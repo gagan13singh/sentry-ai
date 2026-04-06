@@ -12,13 +12,13 @@ export default defineConfig({
       registerType: 'autoUpdate',
       injectManifest: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}', 'icons/*.png'],
-        // Increased slightly to 10MB to accommodate heavy WASM binaries for OCR/Transformers
+        // Set to 10MB to handle heavy WASM files for Local AI
         maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
       },
       manifest: {
         name: 'Sentry AI — Private Intelligence',
         short_name: 'Sentry AI',
-        description: 'The AI that never phones home. 100% local, air-gapped intelligence.',
+        description: '100% local, air-gapped intelligence.',
         theme_color: '#0a0e1a',
         background_color: '#0a0e1a',
         display: 'standalone',
@@ -32,11 +32,11 @@ export default defineConfig({
   server: {
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'require-corp', // Essential for WebGPU/SharedArrayBuffer
+      'Cross-Origin-Embedder-Policy': 'require-corp',
     },
   },
   optimizeDeps: {
-    exclude: ['@mlc-ai/web-llm'], // Prevents Vite from trying to pre-bundle the heavy engine
+    exclude: ['@mlc-ai/web-llm'],
   },
   worker: {
     format: 'es',
@@ -45,16 +45,19 @@ export default defineConfig({
     target: 'esnext',
     rollupOptions: {
       output: {
-        // FIXED: Using a function instead of an object for Vite 8 compatibility
+        // FIXED: Using a function to handle chunking for Vite 8
         manualChunks(id) {
           if (id.includes('node_modules')) {
+            // Group AI dependencies to keep the main bundle light
             if (id.includes('@huggingface') || id.includes('@mlc-ai')) {
-              return 'ai-engine'; // Group all AI logic into one chunk
+              return 'ai-engine';
             }
+            // Keep the vector search separate
             if (id.includes('@orama')) {
-              return 'vector-db'; // Keep the search engine separate
+              return 'vector-db';
             }
-            return 'vendor'; // Everything else (React, etc.)
+            // All other libraries go to vendor
+            return 'vendor';
           }
         },
       },
