@@ -12,9 +12,9 @@ export default defineConfig({
       registerType: 'autoUpdate',
       injectManifest: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}', 'icons/*.png'],
-        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+        // Increased slightly to 10MB to accommodate heavy WASM binaries for OCR/Transformers
+        maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
       },
-      includeAssets: ['favicon.ico', 'icons/*.png'],
       manifest: {
         name: 'Sentry AI — Private Intelligence',
         short_name: 'Sentry AI',
@@ -22,7 +22,6 @@ export default defineConfig({
         theme_color: '#0a0e1a',
         background_color: '#0a0e1a',
         display: 'standalone',
-        orientation: 'portrait-primary',
         icons: [
           { src: 'icons/pwa-192x192.png', sizes: '192x192', type: 'image/png' },
           { src: 'icons/pwa-512x512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
@@ -33,17 +32,11 @@ export default defineConfig({
   server: {
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'require-corp',
-    },
-  },
-  preview: {
-    headers: {
-      'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'require-corp',
+      'Cross-Origin-Embedder-Policy': 'require-corp', // Essential for WebGPU/SharedArrayBuffer
     },
   },
   optimizeDeps: {
-    exclude: ['@mlc-ai/web-llm'],
+    exclude: ['@mlc-ai/web-llm'], // Prevents Vite from trying to pre-bundle the heavy engine
   },
   worker: {
     format: 'es',
@@ -52,9 +45,17 @@ export default defineConfig({
     target: 'esnext',
     rollupOptions: {
       output: {
-        manualChunks: {
-          'transformers': ['@huggingface/transformers'],
-          'orama': ['@orama/orama'],
+        // FIXED: Using a function instead of an object for Vite 8 compatibility
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            if (id.includes('@huggingface') || id.includes('@mlc-ai')) {
+              return 'ai-engine'; // Group all AI logic into one chunk
+            }
+            if (id.includes('@orama')) {
+              return 'vector-db'; // Keep the search engine separate
+            }
+            return 'vendor'; // Everything else (React, etc.)
+          }
         },
       },
     },
