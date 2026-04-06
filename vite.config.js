@@ -12,7 +12,7 @@ export default defineConfig({
       registerType: 'autoUpdate',
       injectManifest: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}', 'icons/*.png'],
-        // Set to 10MB to handle heavy WASM files for Local AI
+        // Increased to 10MB to handle Local AI WASM binaries
         maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
       },
       manifest: {
@@ -29,6 +29,12 @@ export default defineConfig({
       },
     }),
   ],
+  resolve: {
+    alias: {
+      // Fixes the "url" module externalization warning for WebLLM
+      url: 'url/'
+    }
+  },
   server: {
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
@@ -43,20 +49,19 @@ export default defineConfig({
   },
   build: {
     target: 'esnext',
+    // AI models generate large chunks; we increase this to avoid build warnings
+    chunkSizeWarningLimit: 2000,
     rollupOptions: {
       output: {
-        // FIXED: Using a function to handle chunking for Vite 8
-        manualChunks(id) {
+        // FIXED: Using an arrow function for Rolldown (Vite 8) compatibility
+        manualChunks: (id) => {
           if (id.includes('node_modules')) {
-            // Group AI dependencies to keep the main bundle light
-            if (id.includes('@huggingface') || id.includes('@mlc-ai')) {
-              return 'ai-engine';
+            if (id.includes('@mlc-ai') || id.includes('@huggingface')) {
+              return 'ai-core';
             }
-            // Keep the vector search separate
             if (id.includes('@orama')) {
-              return 'vector-db';
+              return 'search-engine';
             }
-            // All other libraries go to vendor
             return 'vendor';
           }
         },
