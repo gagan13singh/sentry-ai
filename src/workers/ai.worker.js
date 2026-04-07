@@ -98,7 +98,7 @@ async function initWASMEngine(onProgress) {
   try {
     wasmEngine = await pipeline('text-generation', WASM_HF_MODEL, {
       dtype: 'q4',
-      device: 'cpu',
+      device: 'wasm', // browsers expose CPU via WebAssembly only — 'cpu' is not valid
       progress_callback: (p) => {
         if (p.status === 'progress') {
           onProgress({
