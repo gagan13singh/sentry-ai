@@ -1,5 +1,6 @@
 /* ================================================================
-   Security UI additions — append to pages.css
+   security.css — Security + Recovery UI
+   NEW: recovery-banner, cutoff-banner, recovery-overlay
    ================================================================ */
 
 /* ── Threat banner ──────────────────────────────────────────────── */
@@ -12,6 +13,7 @@
     font-weight: 500;
     border-bottom: 1px solid;
     animation: slideDown 0.2s ease;
+    flex-wrap: wrap;
 }
 
 @keyframes slideDown {
@@ -64,6 +66,64 @@
     animation: fadeIn 0.3s ease;
 }
 
+/* ── NEW: GPU Recovery banner ───────────────────────────────────── */
+.recovery-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    background: rgba(0, 212, 255, 0.08);
+    border-bottom: 1px solid rgba(0, 212, 255, 0.2);
+    font-size: 0.85rem;
+    color: var(--cyan);
+    animation: slideDown 0.2s ease;
+}
+
+.recovery-spin {
+    animation: spin 1.2s linear infinite;
+    flex-shrink: 0;
+}
+
+/* ── NEW: Recovery overlay (shown over existing messages) ─────── */
+.recovery-overlay {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 20px;
+    background: rgba(8, 12, 24, 0.7);
+    border: 1px solid rgba(0, 212, 255, 0.15);
+    border-radius: var(--radius-lg);
+    backdrop-filter: blur(8px);
+    margin: 12px auto;
+    width: fit-content;
+    min-width: 200px;
+}
+
+/* ── NEW: Knowledge cutoff banner ───────────────────────────────── */
+.cutoff-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 16px;
+    background: rgba(139, 132, 255, 0.08);
+    border-bottom: 1px solid rgba(139, 132, 255, 0.2);
+    font-size: 0.78rem;
+    color: var(--purple);
+    animation: slideDown 0.2s ease;
+    line-height: 1.5;
+}
+
+.cutoff-banner svg {
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+
+.cutoff-banner strong {
+    color: var(--purple);
+}
+
 /* ── Input security icon ─────────────────────────────────────────── */
 .input-security-icon {
     display: flex;
@@ -106,13 +166,6 @@
         opacity: 0.4;
         transform: scale(1.05);
     }
-}
-
-/* ── Threat log entry in sidebar ─────────────────────────────────── */
-.threat-log-indicator {
-    padding: 8px 12px;
-    border-top: 1px solid var(--border);
-    margin-top: auto;
 }
 
 /* ── Network entry risk colors ───────────────────────────────────── */
@@ -160,4 +213,22 @@
     background: var(--emerald-dim);
     color: var(--emerald);
     border: 1px solid rgba(0, 255, 136, 0.2);
+}
+
+/* ── Mobile: stack banners vertically ───────────────────────────── */
+@media (max-width: 768px) {
+    .cutoff-banner {
+        font-size: 0.72rem;
+        padding: 8px 12px;
+    }
+
+    .recovery-banner {
+        font-size: 0.8rem;
+        padding: 8px 12px;
+    }
+
+    .threat-banner {
+        font-size: 0.78rem;
+        padding: 8px 12px;
+    }
 }
