@@ -11,7 +11,7 @@ import { pipeline, env, TextStreamer } from '@huggingface/transformers';
 import * as Comlink from 'comlink';
 
 env.allowRemoteModels = true;
-env.allowLocalModels = true;
+env.allowLocalModels = false; // FIXED: prevent Vercel SPA catch-all from serving index.html for /models/... paths
 env.useBrowserCache = true;
 
 // ── Pipeline Memory Manager ────────────────────────────────────────
