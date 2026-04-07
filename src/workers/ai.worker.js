@@ -196,8 +196,8 @@ const api = {
           if (p.status === 'progress')
             onProgress?.({ stage: 'embed', progress: p.progress / 100, text: 'Loading embeddings…' });
         },
-        // FIXED: Use cpu for embedding pipeline when in WASM mode to avoid conflicts
-        device: currentDevice === 'wasm' ? 'cpu' : 'webgpu',
+        // FIXED: Use wasm for embedding pipeline when in WASM mode (browsers don't support 'cpu')
+        device: currentDevice === 'wasm' ? 'wasm' : 'webgpu',
         dtype: 'fp16',
       })
     );
@@ -229,7 +229,7 @@ const api = {
           if (p.status === 'progress')
             onProgress?.({ stage: 'whisper', progress: p.progress / 100, text: 'Loading Whisper…' });
         },
-        device: currentDevice === 'wasm' ? 'cpu' : 'webgpu',
+        device: currentDevice === 'wasm' ? 'wasm' : 'webgpu',
         dtype: 'fp16',
       })
     );
