@@ -1,9 +1,10 @@
 // ================================================================
-// AI WORKER — Sentry AI Brain
-// WebGPU mode  → WebLLM (Llama 3.2 1B/3B)
-// CPU/WASM mode → Transformers.js ONNX (Qwen2.5 0.5B) — real CPU, no GPU needed
+// AI WORKER — Sentry AI Brain (Enhanced)
+// WebGPU mode  → WebLLM (5 model tiers: Speed/Balanced/Quality/Power)
+// CPU/WASM mode → Transformers.js ONNX (Universal tier, no GPU needed)
 // Pipeline memory manager — unloads unused models to prevent OOM
 // Threat scan pipeline (content safety check, local only)
+// Confidence scoring — tracks RAG context usage
 // ================================================================
 
 import { CreateMLCEngine } from '@mlc-ai/web-llm';
@@ -11,7 +12,7 @@ import { pipeline, env, TextStreamer } from '@huggingface/transformers';
 import * as Comlink from 'comlink';
 
 env.allowRemoteModels = true;
-env.allowLocalModels = false; // FIXED: prevent Vercel SPA catch-all from serving index.html for /models/... paths
+env.allowLocalModels = false;
 env.useBrowserCache = true;
 
 // ── Pipeline Memory Manager ────────────────────────────────────────
@@ -54,6 +55,7 @@ let llmEngine = null;
 // CPU/WASM engine (Transformers.js) — used when WebGPU is absent
 let wasmEngine = null;
 let currentModelId = null;
+let currentModelTier = null; // Track tier for confidence scoring
 let isLoading = false;
 let currentDevice = 'webgpu';
 
@@ -61,12 +63,13 @@ let currentDevice = 'webgpu';
 const WASM_HF_MODEL = 'onnx-community/Qwen2.5-0.5B-Instruct';
 
 // ── WebGPU engine (WebLLM) ─────────────────────────────────────────
-async function initWebGPUEngine(modelId, onProgress) {
+async function initWebGPUEngine(modelId, modelTier, onProgress) {
   if (llmEngine && currentModelId === modelId) return { success: true, cached: true };
   if (isLoading) return { success: false, error: 'Already loading' };
 
   isLoading = true;
   currentModelId = modelId;
+  currentModelTier = modelTier;
   currentDevice = 'webgpu';
 
   try {
@@ -82,23 +85,24 @@ async function initWebGPUEngine(modelId, onProgress) {
     isLoading = false;
     llmEngine = null;
     currentModelId = null;
+    currentModelTier = null;
     return { success: false, error: err.message };
   }
 }
 
 // ── CPU/WASM engine (Transformers.js ONNX) ────────────────────────
-// Genuinely runs on CPU — no WebGPU required. Works on all devices.
 async function initWASMEngine(onProgress) {
   if (wasmEngine) return { success: true, cached: true };
   if (isLoading) return { success: false, error: 'Already loading' };
 
   isLoading = true;
   currentDevice = 'wasm';
+  currentModelTier = 'UNIVERSAL';
 
   try {
     wasmEngine = await pipeline('text-generation', WASM_HF_MODEL, {
       dtype: 'q4',
-      device: 'wasm', // browsers expose CPU via WebAssembly only — 'cpu' is not valid
+      device: 'wasm',
       progress_callback: (p) => {
         if (p.status === 'progress') {
           onProgress({
@@ -114,18 +118,18 @@ async function initWASMEngine(onProgress) {
   } catch (err) {
     isLoading = false;
     wasmEngine = null;
+    currentModelTier = null;
     return { success: false, error: err.message };
   }
 }
 
 // ── Worker API ─────────────────────────────────────────────────────
 const api = {
-  async loadModel(modelId, device = 'webgpu', onProgress) {
+  async loadModel(modelId, modelTier, device = 'webgpu', onProgress) {
     if (device === 'wasm') {
-      // Use Transformers.js ONNX — real CPU, no WebGPU needed
       return await initWASMEngine(onProgress);
     }
-    return await initWebGPUEngine(modelId, onProgress);
+    return await initWebGPUEngine(modelId, modelTier, onProgress);
   },
 
   async chat(messages, streamCallback) {
@@ -147,7 +151,10 @@ const api = {
         streamer,
       });
       streamCallback('', accumulated, true);
-      return { content: accumulated };
+      return {
+        content: accumulated,
+        modelTier: currentModelTier,
+      };
     }
 
     // ── WebGPU path (WebLLM) ──
@@ -164,7 +171,10 @@ const api = {
       if (delta) { full += delta; streamCallback(delta, full, false); }
     }
     streamCallback('', full, true);
-    return { content: full };
+    return {
+      content: full,
+      modelTier: currentModelTier,
+    };
   },
 
   async chatSync(messages) {
@@ -177,7 +187,10 @@ const api = {
       });
       const content = result[0]?.generated_text?.at?.(-1)?.content
         ?? result[0]?.generated_text ?? '';
-      return { content };
+      return {
+        content,
+        modelTier: currentModelTier,
+      };
     }
     // ── WebGPU path ──
     if (!llmEngine) return { error: 'Model not loaded' };
@@ -186,7 +199,10 @@ const api = {
       temperature: 0.3,
       max_tokens: 512,
     });
-    return { content: reply.choices[0].message.content };
+    return {
+      content: reply.choices[0].message.content,
+      modelTier: currentModelTier,
+    };
   },
 
   async embedText(texts, onProgress) {
@@ -196,7 +212,6 @@ const api = {
           if (p.status === 'progress')
             onProgress?.({ stage: 'embed', progress: p.progress / 100, text: 'Loading embeddings…' });
         },
-        // FIXED: Use wasm for embedding pipeline when in WASM mode (browsers don't support 'cpu')
         device: currentDevice === 'wasm' ? 'wasm' : 'webgpu',
         dtype: 'fp16',
       })
@@ -276,6 +291,7 @@ Be conservative — only flag clear violations.`,
       llmLoaded: !!llmEngine || !!wasmEngine,
       activePipelines: Object.keys(activePipelines),
       currentModelId,
+      currentModelTier,
       currentDevice,
       isLoading,
     };
@@ -291,6 +307,7 @@ Be conservative — only flag clear violations.`,
     llmEngine = null;
     wasmEngine = null;
     currentModelId = null;
+    currentModelTier = null;
     return { success: true };
   },
 };

@@ -1,23 +1,17 @@
 // ================================================================
-// Diagnostic.jsx — "Security Scan" Pre-Flight Dashboard
+// Diagnostic.jsx — Enhanced "Security Scan" Pre-Flight Dashboard
 //
-// Behaviour:
-//   • First visit  → runs full theatrical scan (4 animated steps)
-//   • Return visit → detects cached profile, shows "Profile Loaded"
-//                    instantly so user skips the wait
-//   • Re-scan triggers: browser version change, cleared cache
-//
-// After scan completes:
-//   • WebGPU found  → shows ⚡ Sentry Turbo + 🍃 Sentry Lite buttons
-//   • WebGPU absent → silently selects Lite, shows friendly "Unlock" guide
+// NEW: 5-tier model system with smart device-based recommendations
+// NEW: User-friendly adjectives (Lightning Fast, Well-Rounded, etc.)
+// NEW: Shows suitable models based on device capabilities
 // ================================================================
 
 import { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Shield, CheckCircle, Zap, ChevronDown, ChevronUp, RefreshCw, ExternalLink, ChevronRight } from 'lucide-react';
+import { Shield, CheckCircle, Zap, ChevronDown, ChevronUp, RefreshCw, ExternalLink, ChevronRight, Info } from 'lucide-react';
 import { useApp } from '../App';
 import { MODEL_STATUS } from '../hooks/useModelManager';
-import { MODEL_TIERS, generateSessionKey, getCachedProfile, setCachedProfile } from '../lib/deviceProfile';
+import { MODEL_TIERS, generateSessionKey, getCachedProfile, setCachedProfile, getAvailableModels } from '../lib/deviceProfile';
 
 // ── Scan step definitions ────────────────────────────────────────────────────
 const SCAN_STEPS = [
@@ -47,7 +41,7 @@ const SCAN_STEPS = [
     },
 ];
 
-const STEP_DELAY_MS = 900; // theatrical delay between steps
+const STEP_DELAY_MS = 900;
 
 // ── Status badge colours ─────────────────────────────────────────────────────
 const STATUS_STYLES = {
@@ -96,24 +90,22 @@ export default function Diagnostic() {
     const [scanDone, setScanDone] = useState(false);
     const [fromCache, setFromCache] = useState(false);
 
-    // results we derive during the scan
     const scanData = useRef({ sabOk: false, ram: 0, webGPU: false, gpuInfo: null });
 
-    // UI state for after-scan controls
-    const [selectedModel, setSelectedModel] = useState(MODEL_TIERS.LOW.id);
+    const [selectedModel, setSelectedModel] = useState(null);
+    const [availableModels, setAvailableModels] = useState([]);
+    const [recommendedModel, setRecommendedModel] = useState(null);
+    const [deviceRecommendation, setDeviceRecommendation] = useState(null);
     const [showUnlock, setShowUnlock] = useState(false);
 
-    // ── Step helper ────────────────────────────────────────────────────────────
     function setStep(idx, status, result = null) {
         setStepStatuses(prev => { const n = [...prev]; n[idx] = status; return n; });
         setStepResults(prev => { const n = [...prev]; n[idx] = result; return n; });
     }
 
-    // ── Run the theatrical scan ────────────────────────────────────────────────
     async function runFullScan() {
         const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
-        // Step 0 — Browser Isolation (SAB)
         setCurrentStep(0);
         setStep(0, 'running');
         await delay(STEP_DELAY_MS);
@@ -121,7 +113,6 @@ export default function Diagnostic() {
         scanData.current.sabOk = sabOk;
         setStep(0, sabOk ? 'pass' : 'fail', sabOk ? 'SharedArrayBuffer active' : 'Missing COOP/COEP headers');
 
-        // Step 1 — RAM
         setCurrentStep(1);
         setStep(1, 'running');
         await delay(STEP_DELAY_MS);
@@ -129,11 +120,10 @@ export default function Diagnostic() {
         scanData.current.ram = ram;
         setStep(1, 'pass', `${ram} GB detected`);
 
-        // Step 2 — WebGPU (real async probe)
         setCurrentStep(2);
         setStep(2, 'running');
-        const gpuResult = await probeWebGPU(); // real check runs in parallel with the delay
-        await delay(Math.max(0, STEP_DELAY_MS - 100)); // feels snappy but not instant
+        const gpuResult = await probeWebGPU();
+        await delay(Math.max(0, STEP_DELAY_MS - 100));
         scanData.current.webGPU = gpuResult.supported;
         scanData.current.gpuInfo = gpuResult.gpuInfo;
         const gpuLabel = gpuResult.supported
@@ -141,7 +131,6 @@ export default function Diagnostic() {
             : 'Direct GPU access restricted by browser';
         setStep(2, gpuResult.supported ? 'pass' : 'fail', gpuLabel);
 
-        // Step 3 — Session Key
         setCurrentStep(3);
         setStep(3, 'running');
         await delay(STEP_DELAY_MS - 200);
@@ -152,12 +141,10 @@ export default function Diagnostic() {
         finaliseScan();
     }
 
-    // ── Fast path: cached profile ─────────────────────────────────────────────
     async function loadFromCache(cached) {
         setFromCache(true);
-        // Instantly mark all steps as passed / failed based on cache
         const results = [
-            cached.sabAvailable !== false ? 'SharedArrayBuffer active' : 'Missing COOP/COEP headers',
+            cached.hasSharedArrayBuffer !== false ? 'SharedArrayBuffer active' : 'Missing COOP/COEP headers',
             `${cached.ram} GB detected`,
             cached.supportsWebGPU
                 ? (cached.gpuInfo?.description || 'GPU Access Granted')
@@ -173,332 +160,255 @@ export default function Diagnostic() {
         setStepStatuses(statuses);
         setStepResults(results);
         setSessionKey(results[3]);
-        setCurrentStep(4); // all done
+        setCurrentStep(4);
         scanData.current = {
-            sabOk: cached.sabAvailable !== false,
+            sabOk: cached.hasSharedArrayBuffer !== false,
             ram: cached.ram,
             webGPU: cached.supportsWebGPU,
             gpuInfo: cached.gpuInfo,
         };
 
-        // Still populate model context so loadModel() works
-        if (model.status === MODEL_STATUS.IDLE) {
-            model.detectHardware();
-        }
-
-        finaliseScan();
-    }
-
-    // ── Resolve model choice and mark scan complete ───────────────────────────
-    function finaliseScan() {
-        const { webGPU, ram, sabOk } = scanData.current;
-        if (!webGPU || !sabOk) {
-            setSelectedModel(MODEL_TIERS.WASM.id);
-        } else if (webGPU && ram >= 8) {
-            setSelectedModel(MODEL_TIERS.HIGH.id);
-        } else {
-            setSelectedModel(MODEL_TIERS.LOW.id);
-        }
+        await model.detectHardware();
+        const profile = model.hwProfile;
+        populateModelSelections(profile);
         setScanDone(true);
     }
 
-    // ── Mount: decide full scan vs cache hit ──────────────────────────────────
+    function finaliseScan() {
+        setCurrentStep(4);
+        setScanDone(true);
+
+        const profile = {
+            sabAvailable: scanData.current.sabOk,
+            hasSharedArrayBuffer: scanData.current.sabOk,
+            ram: scanData.current.ram,
+            supportsWebGPU: scanData.current.webGPU,
+            gpuInfo: scanData.current.gpuInfo,
+            tier: scanData.current.ram >= 8 ? 'POWER' : scanData.current.ram >= 6 ? 'QUALITY' : scanData.current.ram >= 4 ? 'BALANCED' : 'SPEED',
+        };
+
+        if (!scanData.current.webGPU) {
+            profile.tier = 'UNIVERSAL';
+        }
+
+        setCachedProfile(profile);
+        model.detectHardware().then(() => {
+            populateModelSelections(model.hwProfile);
+        });
+    }
+
+    function populateModelSelections(profile) {
+        if (!profile) return;
+
+        const available = profile.availableModels || [];
+        setAvailableModels(available);
+
+        // Set recommended model
+        const recommended = profile.model;
+        setRecommendedModel(recommended);
+        setSelectedModel(recommended?.id || MODEL_TIERS.UNIVERSAL.id);
+
+        // Set device recommendation message
+        if (profile.recommendations && profile.recommendations.length > 0) {
+            setDeviceRecommendation(profile.recommendations[0]);
+        }
+    }
+
     useEffect(() => {
         const cached = getCachedProfile();
-        if (cached) {
+        if (cached && cached.tier) {
             loadFromCache(cached);
         } else {
-            // Kick off the actual hardware detection at the same time as the UI animation.
-            // detectHardware() populates model.hwProfile for later loadModel() calls.
-            if (model.status === MODEL_STATUS.IDLE) {
-                model.detectHardware().then((profile) => {
-                    if (profile) {
-                        setCachedProfile({
-                            ...profile,
-                            sabAvailable: checkSAB(),
-                        });
-                    }
-                });
-            }
             runFullScan();
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    // ── Launch handler ────────────────────────────────────────────────────────
-    const handleLaunch = () => model.loadModel(selectedModel);
-
+    const canLoad = scanDone && selectedModel;
     const isLoading = model.status === MODEL_STATUS.LOADING;
     const isReady = model.status === MODEL_STATUS.READY;
-    const isError = model.status === MODEL_STATUS.ERROR;
-    const gpuOk = scanData.current.webGPU;
-    const sabOk = scanData.current.sabOk;
-    // WASM can always launch (no GPU required); GPU mode also needs sabOk
-    const canLaunch = scanDone && !isLoading && !isReady && (sabOk || selectedModel === MODEL_TIERS.WASM.id);
+
+    async function handleLoadModel() {
+        if (!canLoad || isLoading) return;
+
+        // Find the tier for the selected model
+        const selectedTier = Object.entries(MODEL_TIERS).find(
+            ([_, tierData]) => tierData.id === selectedModel
+        )?.[0];
+
+        await model.loadModel(selectedModel, selectedTier);
+    }
 
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
-
-            {/* ── Header ── */}
-            <div style={{ marginBottom: 20 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
-                    <Shield size={20} style={{ color: 'var(--cyan)' }} />
-                    <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>
-                        Securing Your Local Environment
-                    </h3>
-                    {fromCache && (
-                        <span style={{
-                            fontSize: 10, fontWeight: 600, letterSpacing: '0.08em',
-                            color: 'var(--emerald)', background: 'rgba(16,185,129,0.12)',
-                            padding: '2px 8px', borderRadius: 4, marginLeft: 'auto',
-                        }}>
-                            PROFILE LOADED
-                        </span>
-                    )}
-                </div>
-                <p style={{ margin: 0, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                    Analyzing your device hardware locally.&nbsp;
-                    <strong style={{ color: 'var(--text-secondary)' }}>
-                        No hardware data is ever sent to our servers.
-                    </strong>
+        <div>
+            <div className="diag-header" style={{ marginBottom: 16 }}>
+                <h2 className="diag-title">
+                    <Shield size={22} className="text-cyan" style={{ marginRight: 8 }} />
+                    {fromCache ? 'Profile Loaded' : 'Security Scan'}
+                </h2>
+                <p className="text-muted text-sm">
+                    {fromCache
+                        ? 'Cached profile detected — no need to rescan.'
+                        : 'Verifying your device can run AI models safely and privately.'
+                    }
                 </p>
+                {fromCache && (
+                    <button
+                        className="btn-icon"
+                        onClick={() => { setFromCache(false); runFullScan(); }}
+                        style={{ marginTop: 10 }}
+                        title="Re-scan hardware"
+                    >
+                        <RefreshCw size={14} /> <span style={{ fontSize: 11, marginLeft: 4 }}>Re-scan</span>
+                    </button>
+                )}
             </div>
 
-            {/* ── Scan Steps ── */}
-            <div style={{
-                background: 'rgba(0,0,0,0.25)',
-                border: '1px solid rgba(255,255,255,0.06)',
-                borderRadius: 10,
-                padding: '14px 16px',
-                fontFamily: 'monospace',
-                fontSize: 12,
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 10,
-                marginBottom: 16,
-            }}>
+            {/* Scan Steps */}
+            <div className="scan-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10, marginBottom: 20 }}>
                 {SCAN_STEPS.map((step, i) => {
                     const status = stepStatuses[i];
                     const result = stepResults[i];
-                    const style = STATUS_STYLES[status] || STATUS_STYLES.pending;
-                    const isActive = currentStep === i && status === 'running';
+                    const style = STATUS_STYLES[status];
+                    const isActive = i === currentStep;
 
                     return (
-                        <div key={step.id} style={{
-                            display: 'flex', alignItems: 'flex-start', gap: 10,
-                            opacity: status === 'pending' ? 0.35 : 1,
-                            transition: 'opacity 0.3s ease',
-                        }}>
-                            {/* Icon + pulse for running */}
-                            <div style={{ position: 'relative', width: 22, flexShrink: 0, paddingTop: 1 }}>
-                                <span style={{ fontSize: 14 }}>{step.icon}</span>
-                                {isActive && (
-                                    <span style={{
-                                        position: 'absolute', top: -2, right: -4,
-                                        width: 7, height: 7, borderRadius: '50%',
-                                        background: 'var(--cyan)',
-                                        animation: 'pulse-dot 0.9s ease-in-out infinite',
-                                    }} />
-                                )}
+                        <div
+                            key={step.id}
+                            style={{
+                                background: isActive ? 'rgba(6,182,212,0.08)' : 'rgba(255,255,255,0.02)',
+                                border: `1px solid ${isActive ? 'rgba(6,182,212,0.3)' : 'rgba(255,255,255,0.08)'}`,
+                                borderRadius: 8,
+                                padding: '12px 14px',
+                                transition: 'all 0.3s ease',
+                            }}
+                        >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                                <span style={{ fontSize: 18 }}>{step.icon}</span>
+                                <span style={{ fontSize: 9, color: style.color, fontWeight: 700, letterSpacing: 0.5 }}>
+                                    {style.label}
+                                </span>
                             </div>
-
-                            {/* Text */}
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                                    <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>
-                                        {step.label}
-                                    </span>
-                                    {status !== 'pending' && (
-                                        <span style={{
-                                            fontSize: 9, fontWeight: 700, letterSpacing: '0.1em',
-                                            color: style.color, padding: '1px 5px',
-                                            border: `1px solid ${style.color}`,
-                                            borderRadius: 3, opacity: 0.9,
-                                        }}>
-                                            {isActive ? style.label : (status === 'pass' ? 'VERIFIED ✓' : STATUS_STYLES[status]?.label)}
-                                        </span>
-                                    )}
-                                </div>
-
-                                {/* Sub-result row */}
-                                {result && !isActive && (
-                                    <div style={{
-                                        color: step.id === 'key' ? 'var(--cyan)' : style.color,
-                                        fontSize: 11, marginTop: 2,
-                                        wordBreak: 'break-all',
-                                        fontWeight: step.id === 'key' ? 600 : 400,
-                                        textShadow: step.id === 'key' ? `0 0 8px ${style.color}` : 'none',
-                                    }}>
-                                        {step.id === 'key'
-                                            ? `${result} — exists only in your RAM`
-                                            : result}
-                                    </div>
-                                )}
-                                {isActive && (
-                                    <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 2 }}>
-                                        {step.subtext}
-                                    </div>
-                                )}
+                            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 3 }}>
+                                {step.label}
                             </div>
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.3 }}>
+                                {result || step.subtext}
+                            </div>
+                            {status === 'running' && (
+                                <div style={{
+                                    width: 6, height: 6, marginTop: 6,
+                                    background: 'var(--cyan)', borderRadius: '50%',
+                                    animation: 'pulse-dot 1.5s ease-in-out infinite',
+                                }} />
+                            )}
                         </div>
                     );
                 })}
             </div>
 
-            {/* ── Post-Scan UI ── */}
-            {scanDone && !isReady && (
-                <>
-                    {/* SAB missing — hard blocker */}
-                    {!sabOk && (
-                        <div className="error-banner" style={{ marginBottom: 16 }}>
-                            <Shield size={15} />
-                            <span>
-                                <strong>Browser isolation headers missing.</strong> Add the included{' '}
-                                <code>vercel.json</code> to your project root (sets COOP/COEP). Then reload.
-                            </span>
+            {/* Device Recommendation Banner */}
+            {scanDone && deviceRecommendation && (
+                <div style={{
+                    background: 'rgba(6,182,212,0.05)',
+                    border: '1px solid rgba(6,182,212,0.2)',
+                    borderRadius: 8,
+                    padding: '12px 14px',
+                    marginBottom: 16,
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: 10,
+                }}>
+                    <Info size={16} className="text-cyan" style={{ marginTop: 2, flexShrink: 0 }} />
+                    <div>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 3 }}>
+                            {deviceRecommendation.message}
                         </div>
-                    )}
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4 }}>
+                            {deviceRecommendation.suggestion}
+                        </div>
+                    </div>
+                </div>
+            )}
 
-                    {/* GPU found → show both WebGPU model options */}
-                    {gpuOk && sabOk && !isLoading && (
-                        <>
-                            <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '0 0 10px', textAlign: 'center' }}>
-                                Your GPU is ready. Choose your AI engine:
-                            </p>
-                            <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
-                                <ModelCard
-                                    tier={MODEL_TIERS.HIGH}
-                                    selected={selectedModel === MODEL_TIERS.HIGH.id}
-                                    onClick={() => setSelectedModel(MODEL_TIERS.HIGH.id)}
-                                    disabled={scanData.current.ram < 8}
-                                    disabledReason="Requires 8 GB RAM"
-                                />
-                                <ModelCard
-                                    tier={MODEL_TIERS.LOW}
-                                    selected={selectedModel === MODEL_TIERS.LOW.id}
-                                    onClick={() => setSelectedModel(MODEL_TIERS.LOW.id)}
-                                />
-                            </div>
-                        </>
-                    )}
+            {/* Model Selection */}
+            {scanDone && !isReady && (
+                <div style={{ marginTop: 20 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+                        <h3 style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
+                            Choose Your AI Engine
+                        </h3>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                            {availableModels.length} compatible {availableModels.length === 1 ? 'model' : 'models'}
+                        </span>
+                    </div>
 
-                    {/* No GPU / SAB ok → WASM CPU card + optional unlock guide */}
-                    {!gpuOk && sabOk && !isLoading && (
-                        <div style={{ marginBottom: 16 }}>
-                            <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '0 0 10px', textAlign: 'center' }}>
-                                No GPU detected. Running in CPU mode:
-                            </p>
-                            <div style={{ display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
-                                <ModelCard
-                                    tier={MODEL_TIERS.WASM}
-                                    selected={selectedModel === MODEL_TIERS.WASM.id}
-                                    onClick={() => setSelectedModel(MODEL_TIERS.WASM.id)}
-                                />
-                            </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 10 }}>
+                        {availableModels.map(tier => (
+                            <ModelCard
+                                key={tier.id}
+                                tier={tier}
+                                selected={selectedModel === tier.id}
+                                recommended={recommendedModel?.id === tier.id}
+                                onClick={() => setSelectedModel(tier.id)}
+                            />
+                        ))}
+                    </div>
 
-                            {/* Optional: unlock GPU guide */}
+                    {!scanData.current.webGPU && (
+                        <div style={{ marginTop: 12 }}>
                             <button
-                                onClick={() => setShowUnlock(v => !v)}
-                                style={{
-                                    width: '100%', background: 'transparent',
-                                    border: '1px dashed rgba(255,255,255,0.15)',
-                                    borderRadius: 7, padding: '8px 14px',
-                                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                    cursor: 'pointer', color: 'var(--text-secondary)', fontSize: 12,
-                                }}
+                                className="btn-icon"
+                                onClick={() => setShowUnlock(!showUnlock)}
+                                style={{ fontSize: 11, color: 'var(--cyan)' }}
                             >
-                                <span>⚡ Want faster GPU mode? Unlock WebGPU</span>
-                                {showUnlock ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                                {showUnlock ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                <span style={{ marginLeft: 4 }}>How to enable faster models</span>
                             </button>
-
                             {showUnlock && <UnlockGuide />}
                         </div>
                     )}
 
-                    {/* Launch button */}
-                    {canLaunch && (
+                    <div style={{ marginTop: 16, textAlign: 'center' }}>
                         <button
-                            className="btn btn-primary btn-lg w-full"
-                            onClick={handleLaunch}
-                            style={{ marginTop: 4 }}
+                            className="btn btn-primary btn-lg"
+                            onClick={handleLoadModel}
+                            disabled={!canLoad || isLoading}
+                            style={{ minWidth: 200 }}
                         >
-                            <Zap size={16} />
-                            {selectedModel === MODEL_TIERS.HIGH.id
-                                ? 'Launch Sentry Turbo'
-                                : selectedModel === MODEL_TIERS.WASM.id
-                                    ? '🧠 Launch in CPU Mode'
-                                    : 'Launch Sentry Lite'}
+                            {isLoading ? 'Loading Model...' : 'Load AI Model'}
                         </button>
-                    )}
-
-                    {/* Error state */}
-                    {isError && (
-                        <div className="error-banner" style={{ marginTop: 12 }}>
-                            <span>{model.error}</span>
-                            <button
-                                className="btn btn-ghost btn-sm"
-                                style={{ marginLeft: 'auto' }}
-                                onClick={() => model.detectHardware()}
-                            >
-                                <RefreshCw size={12} /> Retry
-                            </button>
-                        </div>
-                    )}
-                </>
+                    </div>
+                </div>
             )}
 
-            {/* ── Loading Progress ── */}
+            {/* Loading Progress */}
             {isLoading && <LoadingProgress model={model} selectedModel={selectedModel} />}
 
-            {/* ── Ready State ── */}
+            {/* Ready State */}
             {isReady && (
-                <div className="fade-in" style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center',
-                    textAlign: 'center',
-                    padding: '32px 16px 16px',
-                    gap: 12,
-                }}>
-                    {/* Animated checkmark */}
-                    <div style={{
-                        width: 64, height: 64,
-                        borderRadius: '50%',
-                        background: 'rgba(0,255,136,0.1)',
-                        border: '2px solid var(--emerald)',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        boxShadow: '0 0 24px rgba(0,255,136,0.25)',
-                        marginBottom: 4,
-                    }}>
-                        <CheckCircle size={36} style={{ color: 'var(--emerald)' }} />
-                    </div>
-
-                    <h3 style={{ color: 'var(--emerald)', margin: 0, fontSize: 20 }}>
-                        Sentry AI is Ready
-                    </h3>
-
-                    <p style={{ margin: 0, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-                        {selectedModel === MODEL_TIERS.WASM.id
-                            ? 'Model loaded in CPU/WASM mode. All processing is 100% local.'
-                            : 'Model loaded into WebGPU memory. You\'re now air-gapped capable.'}
+                <div className="setup-block success-block fade-in" style={{ marginTop: 20, textAlign: 'center' }}>
+                    <div className="divider" />
+                    <CheckCircle size={48} className="text-emerald" style={{ margin: '16px 0' }} />
+                    <h3 className="text-emerald" style={{ marginBottom: 8 }}>Model Loaded Successfully</h3>
+                    <p className="text-muted text-sm" style={{ marginBottom: 16 }}>
+                        Your AI is ready. All inference happens locally on your device.
                     </p>
 
-                    {/* Engine badge */}
                     <div style={{
-                        display: 'inline-flex', alignItems: 'center', gap: 6,
-                        fontSize: 11, color: 'var(--text-muted)',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        padding: '10px 16px',
+                        background: 'rgba(16,185,129,0.1)',
+                        border: '1px solid var(--emerald)',
+                        borderRadius: 8,
+                        marginBottom: 12,
                     }}>
-                        Engine:{' '}
-                        <span style={{
-                            display: 'inline-flex', alignItems: 'center', gap: 4,
-                            color: selectedModel === MODEL_TIERS.HIGH.id ? 'var(--cyan)' : 'var(--emerald)',
-                            fontWeight: 600,
-                        }}>
-                            {selectedModel === MODEL_TIERS.HIGH.id
-                                ? <>{MODEL_TIERS.HIGH.icon} {MODEL_TIERS.HIGH.shortLabel}<span style={{ color: 'var(--text-muted)', fontWeight: 400 }}> (3B)</span></>
-                                : selectedModel === MODEL_TIERS.WASM.id
-                                    ? <>{MODEL_TIERS.WASM.icon} {MODEL_TIERS.WASM.shortLabel}<span style={{ color: 'var(--text-muted)', fontWeight: 400 }}> (0.5B)</span></>
-                                    : <>{MODEL_TIERS.LOW.icon} {MODEL_TIERS.LOW.shortLabel}<span style={{ color: 'var(--text-muted)', fontWeight: 400 }}> (1B)</span></>}
+                        <span style={{ fontSize: 22 }}>
+                            {Object.values(MODEL_TIERS).find(t => t.id === selectedModel)?.icon || '🎯'}
+                        </span>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                            {Object.values(MODEL_TIERS).find(t => t.id === selectedModel)?.shortLabel || 'Model Loaded'}
                         </span>
                     </div>
 
@@ -512,66 +422,79 @@ export default function Diagnostic() {
                 </div>
             )}
 
-            {/* ── Keyframe for pulse dot ── */}
             <style>{`
-        @keyframes pulse-dot {
-          0%, 100% { opacity: 1; transform: scale(1); }
-          50% { opacity: 0.4; transform: scale(0.6); }
-        }
-      `}</style>
+                @keyframes pulse-dot {
+                    0%, 100% { opacity: 1; transform: scale(1); }
+                    50% { opacity: 0.4; transform: scale(0.6); }
+                }
+            `}</style>
         </div>
     );
 }
 
 // ── Model selection card ──────────────────────────────────────────────────────
-function ModelCard({ tier, selected, onClick, disabled = false, disabledReason }) {
+function ModelCard({ tier, selected, recommended, onClick }) {
     return (
         <button
-            onClick={disabled ? undefined : onClick}
-            disabled={disabled}
+            onClick={onClick}
             style={{
-                flex: 1, minWidth: 130,
-                background: selected
-                    ? (tier.icon === '⚡' ? 'rgba(6,182,212,0.12)' : 'rgba(16,185,129,0.1)')
-                    : 'rgba(255,255,255,0.03)',
-                border: `1px solid ${selected
-                    ? (tier.icon === '⚡' ? 'var(--cyan)' : 'var(--emerald)')
-                    : 'rgba(255,255,255,0.1)'}`,
-                borderRadius: 9, padding: '12px 14px',
-                cursor: disabled ? 'not-allowed' : 'pointer',
+                background: selected ? 'rgba(6,182,212,0.12)' : 'rgba(255,255,255,0.03)',
+                border: `1px solid ${selected ? 'var(--cyan)' : 'rgba(255,255,255,0.1)'}`,
+                borderRadius: 8,
+                padding: '12px 14px',
+                cursor: 'pointer',
                 textAlign: 'left',
-                opacity: disabled ? 0.45 : 1,
                 transition: 'all 0.2s ease',
+                position: 'relative',
             }}
         >
-            <div style={{ fontSize: 18, marginBottom: 5 }}>{tier.icon}</div>
+            {recommended && (
+                <div style={{
+                    position: 'absolute',
+                    top: -6,
+                    right: 8,
+                    fontSize: 9,
+                    fontWeight: 700,
+                    color: 'var(--cyan)',
+                    background: 'var(--bg)',
+                    padding: '2px 6px',
+                    borderRadius: 4,
+                    border: '1px solid var(--cyan)',
+                    letterSpacing: 0.5,
+                }}>
+                    RECOMMENDED
+                </div>
+            )}
+
+            <div style={{ fontSize: 20, marginBottom: 6 }}>{tier.icon}</div>
             <div style={{ fontWeight: 700, fontSize: 13, color: 'var(--text-primary)', marginBottom: 2 }}>
                 {tier.shortLabel}
             </div>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4 }}>
-                {disabled ? disabledReason : tier.tagline}
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4, marginBottom: 4 }}>
+                {tier.tagline}
             </div>
-            <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 5 }}>
-                {tier.size} · {tier.label.split('·')[0].trim()}
+            <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                {tier.size}
             </div>
         </button>
     );
 }
 
-// ── "Unlock Pro Performance" chrome://flags guide ─────────────────────────────
+// ── "Unlock Pro Performance" guide ───────────────────────────────────────────
 function UnlockGuide() {
     return (
         <div style={{
             background: 'rgba(6,182,212,0.05)',
             border: '1px solid rgba(6,182,212,0.15)',
-            borderRadius: '0 0 7px 7px',
+            borderRadius: 8,
             padding: '14px 16px',
+            marginTop: 12,
             fontSize: 12,
             lineHeight: 1.6,
         }}>
             <p style={{ margin: '0 0 10px', color: 'var(--text-secondary)' }}>
                 <strong>Why is it restricted?</strong> Your browser has a safety speed-limiter active for
-                newer GPU APIs. Enabling it is safe for your data — it simply lets Sentry&apos;s local AI
+                newer GPU APIs. Enabling it is safe — it simply lets Sentry's local AI
                 talk directly to your graphics chip for faster responses.
             </p>
 
@@ -586,12 +509,6 @@ function UnlockGuide() {
                 <li>Also search <code style={{ color: 'var(--cyan)' }}>Vulkan</code> → set to <strong>Enabled</strong></li>
                 <li>Click <strong>Relaunch</strong> and return here</li>
             </ol>
-
-            <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 11 }}>
-                💡 Chrome labels these "experimental" — not because your device is at risk, but because
-                direct-to-GPU technology is newer than standard browser buttons. Your data stays 100% local
-                either way.
-            </p>
 
             <a
                 href="https://developer.chrome.com/docs/web-platform/webgpu"
@@ -610,7 +527,8 @@ function UnlockGuide() {
 
 // ── Loading progress sub-component ───────────────────────────────────────────
 function LoadingProgress({ model, selectedModel }) {
-    const isTurbo = selectedModel === MODEL_TIERS.HIGH.id;
+    const selectedTier = Object.values(MODEL_TIERS).find(t => t.id === selectedModel);
+
     return (
         <div className="setup-block loading-block fade-in" style={{ marginTop: 12 }}>
             <div className="divider" />
@@ -634,7 +552,7 @@ function LoadingProgress({ model, selectedModel }) {
                             width: `${model.progress.percent}%`,
                             background: model.progress.percent === 100
                                 ? 'linear-gradient(90deg, var(--emerald), var(--cyan))'
-                                : (isTurbo ? 'var(--cyan)' : 'var(--emerald)'),
+                                : 'var(--cyan)',
                             transition: 'width 0.4s ease',
                         }}
                     />
@@ -664,16 +582,16 @@ function LoadingProgress({ model, selectedModel }) {
                         The model loads from your local cache into GPU memory. Intentional — guarantees zero cloud calls.
                     </span>
                 </div>
-                <div className="loading-info-card">
-                    <strong className="text-xs text-cyan">
-                        {isTurbo ? '⚡ Turbo Mode' : '🍃 Lite Mode'}
-                    </strong>
-                    <span className="text-xs text-muted">
-                        {isTurbo
-                            ? '3B parameter model — best for complex reasoning on 8 GB+ RAM.'
-                            : '1B parameter model — efficient and stable on all hardware.'}
-                    </span>
-                </div>
+                {selectedTier && (
+                    <div className="loading-info-card">
+                        <strong className="text-xs text-cyan">
+                            {selectedTier.icon} {selectedTier.shortLabel}
+                        </strong>
+                        <span className="text-xs text-muted">
+                            {selectedTier.tagline} · {selectedTier.size}
+                        </span>
+                    </div>
+                )}
             </div>
         </div>
     );

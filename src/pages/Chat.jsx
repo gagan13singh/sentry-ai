@@ -1,14 +1,8 @@
 // ================================================================
-// Chat.jsx — Main AI Chat Interface
-// FIXED: Textarea auto-resize on typing (scrollHeight approach)
-// FIXED: Base64 images stripped before saving to avoid 5MB localStorage limit
-//        Images are kept in-memory for the current session only
-// FIXED: stale closure on activeConv (useMemo)
-// FIXED: isStreaming prop passed to ReactMarkdown
-// NEW: Threat detection on every user input
-// NEW: Clipboard guard against paste injection
-// NEW: PII warning before sending
-// NEW: Conversation export
+// Chat.jsx — Main AI Chat Interface (Enhanced)
+// NEW: Confidence scoring on AI responses
+// NEW: 5-tier model system with smart suggestions
+// ENHANCED: Better model selection UI with adjectives
 // ================================================================
 
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
@@ -16,7 +10,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   Send, Image, Mic, MicOff, Plus, Trash2, ChevronRight,
   Sparkles, User, Copy, Check, StopCircle, FileText,
-  ShieldAlert, ShieldCheck, Download, AlertTriangle
+  ShieldAlert, ShieldCheck, Download, AlertTriangle, Info
 } from 'lucide-react';
 import { useApp } from '../App';
 import { MODEL_STATUS } from '../hooks/useModelManager';
@@ -24,20 +18,20 @@ import { useThreatDetector } from '../hooks/useThreadDetector';
 import { useClipboardGuard } from '../hooks/useClipboardGuard';
 import { useSessionVault } from '../hooks/useSessionVault';
 import { initDB, hybridSearch } from '../lib/orama';
+import { calculateConfidenceScore } from '../lib/deviceProfile';
 import ReactMarkdown from '../components/ReactMarkdown';
 
 function newConversation() {
   return { id: Date.now().toString(), title: 'New Chat', messages: [], createdAt: Date.now() };
 }
 
-// FIXED: Strip base64 image data before persisting to avoid 5MB localStorage limit.
-// Images are large (200KB+) and don't need to survive tab close.
+// Strip base64 image data before persisting to avoid 5MB localStorage limit
 function stripImagesForStorage(conversations) {
   return conversations.map(conv => ({
     ...conv,
     messages: conv.messages.map(msg =>
       msg.image
-        ? { ...msg, image: null, _hadImage: true } // mark that image existed
+        ? { ...msg, image: null, _hadImage: true }
         : msg
     ),
   }));
@@ -96,202 +90,236 @@ export default function Chat() {
     initDB();
   }, []);
 
-  // FIXED: Strip base64 images before saving to avoid 5MB localStorage quota
+  // Strip base64 images before saving
   useEffect(() => {
     if (conversations.length > 0) {
       vault.saveConversations(stripImagesForStorage(conversations));
     }
   }, [conversations]);
 
-  // Scroll to bottom
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [conversations, activeId]);
-
-  const activeConv = useMemo(
-    () => conversations.find(c => c.id === activeId) || conversations[0],
-    [conversations, activeId]
+  const activeConv = useMemo(() =>
+    conversations.find(c => c.id === activeId), [conversations, activeId]
   );
 
-  // ── Helpers ──────────────────────────────────────────────────────
-  function addMessage(convId, msg) {
-    setConversations(prev => prev.map(c => {
-      if (c.id !== convId) return c;
-      const msgs = [...c.messages, msg];
-      // FIXED: Use index 0 (first user message) not 1
-      const firstUserMsg = msgs.find(m => m.role === 'user');
-      const title = c.title === 'New Chat' && firstUserMsg
-        ? firstUserMsg.content.slice(0, 40) + (firstUserMsg.content.length > 40 ? '…' : '')
-        : c.title;
-      return { ...c, messages: msgs, title };
-    }));
-  }
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [activeConv?.messages]);
 
-  // ── Textarea auto-resize ─────────────────────────────────────────
-  // FIXED: Auto-expand textarea as user types
-  const handleInputChange = useCallback((e) => {
+  // ── Auto-resize textarea ───────────────────────────────────────────
+  const handleInputChange = (e) => {
+    const textarea = e.target;
+    textarea.style.height = 'auto';
+    textarea.style.height = Math.min(textarea.scrollHeight, 200) + 'px';
     setInput(e.target.value);
-    // Reset height to auto first to get correct scrollHeight
-    e.target.style.height = 'auto';
-    e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
-  }, []);
-
-  // Reset height after sending
-  const resetTextareaHeight = useCallback(() => {
-    if (inputRef.current) {
-      inputRef.current.style.height = 'auto';
-    }
-  }, []);
-
-  // ── Send message ─────────────────────────────────────────────────
-  const handleSend = useCallback(async () => {
-    if (!input.trim() && !attachedImage) return;
-    if (!model.isReady) return;
-
-    const userText = input.trim();
-    const imageToSend = attachedImage;
-
-    if (userText) {
-      const scan = await scanInput(userText, model.scanContentThreat);
-      if (!scan.safe && scan.score > 60) {
-        const proceed = window.confirm(
-          `⚠️ Security Warning\n\nSentry AI detected a potential threat in your message:\n${scan.threats.map(t => `• ${t.type}`).join('\n')}\n\nThis may be an attempt to manipulate the AI. Send anyway?`
-        );
-        if (!proceed) return;
-      }
-      if (scan.piiFound?.length > 0) {
-        setPiiWarning(`Your message may contain: ${scan.piiFound.join(', ')}. This stays on your device.`);
-        setTimeout(() => setPiiWarning(null), 5000);
-      }
-    }
-
-    setInput('');
-    resetTextareaHeight(); // FIXED: reset height after clearing
-    setAttachedImage(null);
-    setIsStreaming(true);
-    setThreatBanner(null);
-    abortRef.current = false;
-
-    const userMsg = {
-      id: Date.now().toString(),
-      role: 'user',
-      content: userText,
-      image: imageToSend,
-      timestamp: new Date().toLocaleTimeString(),
-    };
-    addMessage(activeId, userMsg);
-
-    let context = [];
-    if (userText) {
-      try {
-        const embedding = await model.embedText(userText);
-        if (embedding) {
-          context = await hybridSearch(userText, new Float32Array(embedding), 4);
-          setRagContext(context);
-        }
-      } catch { }
-    }
-
-    let imageCaption = '';
-    if (imageToSend) {
-      try { imageCaption = await model.captionImage(imageToSend); } catch { }
-    }
-
-    const systemPrompt = `You are Sentry AI, a helpful, general-purpose local AI assistant. 
-Answer questions on ANY topic the user asks about. Do NOT assume the user is asking about security unless explicitly stated. Be helpful, concise, and accurate.
-${context.length ? `\n\n## Relevant context from user's private vault:\n${context.map((c, i) => `[${i + 1}] (${c.source}): ${c.content}`).join('\n\n')}` : ''}
-${imageCaption ? `\n\n## Image description: ${imageCaption}` : ''}`;
-
-    const messages = [
-      { role: 'system', content: systemPrompt },
-      ...(activeConv?.messages.slice(-8) || []).map(m => ({ role: m.role, content: m.content })),
-      { role: 'user', content: userText || (imageCaption ? `Describe: ${imageCaption}` : '') },
-    ];
-
-    const assistantId = (Date.now() + 1).toString();
-    addMessage(activeId, {
-      id: assistantId,
-      role: 'assistant',
-      content: '',
-      timestamp: new Date().toLocaleTimeString(),
-      streaming: true,
-    });
-
-    try {
-      await model.chat(messages, (delta, full, done) => {
-        if (abortRef.current) return;
-        setConversations(prev => prev.map(c => {
-          if (c.id !== activeId) return c;
-          return {
-            ...c,
-            messages: c.messages.map(m =>
-              m.id === assistantId ? { ...m, content: full, streaming: !done } : m
-            ),
-          };
-        }));
-        if (done) setIsStreaming(false);
-      });
-    } catch (e) {
-      setConversations(prev => prev.map(c => {
-        if (c.id !== activeId) return c;
-        return {
-          ...c,
-          messages: c.messages.map(m =>
-            m.id === assistantId ? { ...m, content: `Error: ${e.message}`, streaming: false } : m
-          ),
-        };
-      }));
-      setIsStreaming(false);
-    }
-  }, [input, attachedImage, model, activeId, activeConv, scanInput, resetTextareaHeight]);
-
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
-  const handlePaste = createPasteHandler(setInput, input);
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
 
-  const handleImageFile = (file) => {
+  const handlePaste = useCallback(createPasteHandler((pastedText) => {
+    setInput(prev => prev + pastedText);
+  }), [createPasteHandler]);
+
+  // ── PII detection ──────────────────────────────────────────────────
+  const checkPII = (text) => {
+    const patterns = [
+      { type: 'email', regex: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/ },
+      { type: 'phone', regex: /\b(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/ },
+      { type: 'ssn', regex: /\b\d{3}-\d{2}-\d{4}\b/ },
+      { type: 'credit card', regex: /\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b/ },
+    ];
+    const found = patterns.filter(p => p.regex.test(text)).map(p => p.type);
+    return found.length > 0 ? found : null;
+  };
+
+  // ── Image attachment ───────────────────────────────────────────────
+  const handleImageFile = async (file) => {
     const reader = new FileReader();
     reader.onload = (e) => setAttachedImage(e.target.result);
     reader.readAsDataURL(file);
   };
 
+  // ── Voice recording ────────────────────────────────────────────────
   const toggleRecording = async () => {
-    if (isRecording) { mediaRecRef.current?.stop(); setIsRecording(false); return; }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const rec = new MediaRecorder(stream);
-      audioChunks.current = [];
-      rec.ondataavailable = e => audioChunks.current.push(e.data);
-      rec.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop());
-        const blob = new Blob(audioChunks.current, { type: 'audio/webm' });
-        const arrayBuffer = await blob.arrayBuffer();
-        const audioCtx = new AudioContext({ sampleRate: 16000 });
-        const decoded = await audioCtx.decodeAudioData(arrayBuffer);
-        const text = await model.transcribeAudio(decoded.getChannelData(0));
-        if (text) setInput(prev => prev + (prev ? ' ' : '') + text.trim());
-      };
-      rec.start();
-      mediaRecRef.current = rec;
-      setIsRecording(true);
-    } catch { }
+    if (isRecording) {
+      mediaRecRef.current?.stop();
+      setIsRecording(false);
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const recorder = new MediaRecorder(stream);
+        audioChunks.current = [];
+        recorder.ondataavailable = (e) => audioChunks.current.push(e.data);
+        recorder.onstop = async () => {
+          const blob = new Blob(audioChunks.current, { type: 'audio/webm' });
+          const arrayBuffer = await blob.arrayBuffer();
+          const text = await model.transcribeAudio(arrayBuffer);
+          setInput(prev => prev + (prev ? ' ' : '') + text);
+          stream.getTracks().forEach(t => t.stop());
+        };
+        mediaRecRef.current = recorder;
+        recorder.start();
+        setIsRecording(true);
+      } catch (err) {
+        alert('Microphone access denied');
+      }
+    }
   };
 
-  const copyMessage = (id, content) => {
-    navigator.clipboard.writeText(content);
+  // ── RAG search ─────────────────────────────────────────────────────
+  const searchRAG = async (query) => {
+    try {
+      const results = await hybridSearch(query, { limit: 3 });
+      setRagContext(results);
+      return results.map(r => r.text).join('\n\n');
+    } catch {
+      return '';
+    }
+  };
+
+  // ── Main send handler ──────────────────────────────────────────────
+  const handleSend = async () => {
+    if ((!input.trim() && !attachedImage) || !model.isReady || isStreaming) return;
+
+    const userText = input.trim();
+    const pii = checkPII(userText);
+    if (pii) {
+      setPiiWarning(`Detected possible ${pii.join(', ')} in your message. Data stays local.`);
+      setTimeout(() => setPiiWarning(null), 6000);
+    }
+
+    await scanInput(userText);
+
+    const userMsg = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: userText,
+      image: attachedImage,
+      timestamp: new Date().toLocaleTimeString(),
+    };
+
+    setConversations(prev => prev.map(c =>
+      c.id === activeId ? { ...c, messages: [...c.messages, userMsg] } : c
+    ));
+
+    setInput('');
+    setAttachedImage(null);
+    if (inputRef.current) {
+      inputRef.current.style.height = 'auto';
+    }
+    setIsStreaming(true);
+    abortRef.current = false;
+
+    const ragText = await searchRAG(userText);
+    const hasRagContext = ragText.length > 0;
+
+    const systemPrompt = `You are Sentry AI, a private local AI assistant. Be helpful, accurate, and concise.${hasRagContext ? `\n\nContext from user documents:\n${ragText}` : ''
+      }`;
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...activeConv.messages.filter(m => !m.streaming).map(m => ({
+        role: m.role,
+        content: m.content,
+      })),
+      { role: 'user', content: userText },
+    ];
+
+    const assistantId = (Date.now() + 1).toString();
+    let assistantMsg = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      streaming: true,
+      timestamp: new Date().toLocaleTimeString(),
+      hasRagContext, // Track if response used RAG context
+    };
+
+    setConversations(prev => prev.map(c =>
+      c.id === activeId ? { ...c, messages: [...c.messages, assistantMsg] } : c
+    ));
+
+    try {
+      const result = await model.chat(messages, (delta, full, done) => {
+        if (abortRef.current) return;
+        setConversations(prev => prev.map(c =>
+          c.id === activeId ? {
+            ...c,
+            messages: c.messages.map(m =>
+              m.id === assistantId ? { ...m, content: full, streaming: !done } : m
+            ),
+          } : c
+        ));
+      });
+
+      // Calculate confidence score after response completes
+      if (result?.content) {
+        const confidence = calculateConfidenceScore(
+          hasRagContext,
+          model.modelTier || 'BALANCED',
+          result.content.length
+        );
+
+        setConversations(prev => prev.map(c =>
+          c.id === activeId ? {
+            ...c,
+            messages: c.messages.map(m =>
+              m.id === assistantId ? {
+                ...m,
+                streaming: false,
+                confidence, // Add confidence score to message
+              } : m
+            ),
+          } : c
+        ));
+
+        // Update conversation title if first exchange
+        if (activeConv.messages.length === 0) {
+          const title = userText.slice(0, 40) + (userText.length > 40 ? '…' : '');
+          setConversations(prev => prev.map(c =>
+            c.id === activeId ? { ...c, title } : c
+          ));
+        }
+      }
+    } catch (err) {
+      console.error('Chat error:', err);
+      setConversations(prev => prev.map(c =>
+        c.id === activeId ? {
+          ...c,
+          messages: c.messages.map(m =>
+            m.id === assistantId ? {
+              ...m,
+              content: 'Error: ' + err.message,
+              streaming: false,
+            } : m
+          ),
+        } : c
+      ));
+    }
+
+    setIsStreaming(false);
+    setRagContext([]);
+  };
+
+  // ── Copy message ───────────────────────────────────────────────────
+  const copyMessage = (id, text) => {
+    navigator.clipboard.writeText(text);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
   };
 
+  // ── Export conversations ───────────────────────────────────────────
   const exportConversations = () => {
     const data = JSON.stringify(conversations, null, 2);
     const blob = new Blob([data], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `sentry-ai-conversations-${Date.now()}.json`;
+    a.download = `sentry-conversations-${Date.now()}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -413,6 +441,29 @@ ${imageCaption ? `\n\n## Image description: ${imageCaption}` : ''}`;
                   <ReactMarkdown content={msg.content} isStreaming={!!msg.streaming} />
                   {msg.streaming && <span className="cursor-blink">▍</span>}
                 </div>
+
+                {/* Confidence Score Display - Only for assistant messages */}
+                {msg.role === 'assistant' && !msg.streaming && msg.confidence && (
+                  <div className="confidence-badge" style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    padding: '4px 8px',
+                    marginTop: 8,
+                    borderRadius: 4,
+                    fontSize: 11,
+                    fontWeight: 500,
+                    backgroundColor: msg.confidence.level === 'high' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
+                    color: msg.confidence.level === 'high' ? 'var(--emerald)' : 'var(--amber)',
+                    border: `1px solid ${msg.confidence.level === 'high' ? 'var(--emerald)' : 'var(--amber)'}`,
+                  }}>
+                    <span>{msg.confidence.display}</span>
+                    <div className="confidence-tooltip" title={msg.confidence.explanation}>
+                      <Info size={12} style={{ opacity: 0.7 }} />
+                    </div>
+                  </div>
+                )}
+
                 <div className="msg-footer">
                   <span className="text-xs text-muted">{msg.timestamp}</span>
                   {!msg.streaming && (
@@ -458,7 +509,6 @@ ${imageCaption ? `\n\n## Image description: ${imageCaption}` : ''}`;
               <Image size={18} />
             </button>
 
-            {/* FIXED: Auto-resize textarea */}
             <textarea
               ref={inputRef}
               className="chat-textarea"

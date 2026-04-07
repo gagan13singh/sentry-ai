@@ -1,13 +1,11 @@
 // ================================================================
 // useModelManager.js
-// FIXED: Passes device ('webgpu' | 'wasm') to worker loadModel
-// FIXED: scanContentThreat exposed correctly via Comlink
-// FIXED: stale closure protection on chat callback
+// Enhanced with 5-tier model system and confidence tracking
 // ================================================================
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as Comlink from 'comlink';
-import { detectHardwareProfile } from '../lib/deviceProfile';
+import { detectHardwareProfile, getModelTierFromId } from '../lib/deviceProfile';
 import { isModelCached, markModelCached, getStorageInfo } from '../lib/opfs';
 
 export const MODEL_STATUS = {
@@ -23,6 +21,7 @@ export function useModelManager() {
   const [progress, setProgress] = useState({ stage: '', text: '', percent: 0 });
   const [hwProfile, setHwProfile] = useState(null);
   const [modelId, setModelId] = useState(null);
+  const [modelTier, setModelTier] = useState(null); // Track current model tier
   const [error, setError] = useState(null);
   const [storageInfo, setStorageInfo] = useState(null);
 
@@ -62,14 +61,13 @@ export function useModelManager() {
     }
   }, []);
 
-  const loadModel = useCallback(async (overrideModelId = null) => {
+  const loadModel = useCallback(async (overrideModelId = null, overrideTier = null) => {
     const api = apiRef.current;
     if (!api) return;
 
     let profile = hwProfile;
     if (!profile) profile = await detectHardware();
 
-    // FIXED: No longer hard-fail on missing WebGPU — WASM fallback handles it
     if (!profile) {
       setError('Could not detect hardware profile.');
       setStatus(MODEL_STATUS.ERROR);
@@ -77,16 +75,19 @@ export function useModelManager() {
     }
 
     const targetModel = overrideModelId || profile.model?.id;
+    const targetTier = overrideTier || profile.tier;
+
     if (!targetModel) {
       setError('No compatible model found for this device.');
       setStatus(MODEL_STATUS.ERROR);
       return;
     }
 
-    // FIXED: Determine device from profile (webgpu or wasm)
+    // Determine device from profile (webgpu or wasm)
     const device = profile.model?.device || (profile.supportsWebGPU && !profile.isFallbackAdapter ? 'webgpu' : 'wasm');
 
     setModelId(targetModel);
+    setModelTier(targetTier);
     setStatus(MODEL_STATUS.LOADING);
     setError(null);
 
@@ -99,8 +100,8 @@ export function useModelManager() {
     });
 
     try {
-      // FIXED: Pass device to worker
-      const result = await api.loadModel(targetModel, device, progressCallback);
+      // Pass model tier to worker for confidence tracking
+      const result = await api.loadModel(targetModel, targetTier, device, progressCallback);
       if (result.success) {
         setStatus(MODEL_STATUS.READY);
         setProgress({ stage: 'done', text: 'Model ready', percent: 100 });
@@ -154,7 +155,7 @@ export function useModelManager() {
   const isReady = status === MODEL_STATUS.READY;
 
   return {
-    status, progress, hwProfile, modelId, error, storageInfo, isReady,
+    status, progress, hwProfile, modelId, modelTier, error, storageInfo, isReady,
     detectHardware, loadModel, chat, embedText, captionImage,
     transcribeAudio, scanContentThreat,
   };
