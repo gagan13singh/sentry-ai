@@ -1,13 +1,16 @@
 // ================================================================
 // Home.jsx — Onboarding / Model Loader page
-// Hardware detection → model selection → download + boot
+// FIXED: Full mobile responsiveness during download progress
+// FIXED: SharedArrayBuffer availability check shown to user
+// FIXED: Mobile model override notice (forced 1B for stability)
+// FIXED: All text readable on small screens, no overflow
 // ================================================================
 
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Shield, Cpu, Zap, Eye, Mic, Lock, ChevronRight,
-  CheckCircle, AlertTriangle, RefreshCw, HardDrive
+  CheckCircle, AlertTriangle, RefreshCw, HardDrive, Smartphone
 } from 'lucide-react';
 import { useApp } from '../App';
 import { MODEL_STATUS } from '../hooks/useModelManager';
@@ -16,18 +19,16 @@ import '../App.css';
 
 export default function Home() {
   const { model } = useApp();
-  const navigate  = useNavigate();
+  const navigate = useNavigate();
   const [selectedModel, setSelectedModel] = useState(null);
   const [showModelPicker, setShowModelPicker] = useState(false);
 
-  // Auto-detect on mount
   useEffect(() => {
     if (model.status === MODEL_STATUS.IDLE) {
       model.detectHardware();
     }
   }, []);
 
-  // Set default selected model when profile detected
   useEffect(() => {
     if (model.hwProfile?.model && !selectedModel) {
       setSelectedModel(model.hwProfile.model.id);
@@ -35,12 +36,12 @@ export default function Home() {
   }, [model.hwProfile]);
 
   const handleLoad = () => model.loadModel(selectedModel);
-  const allModels  = getAllModels();
+  const allModels = getAllModels();
 
-  const isLoading  = model.status === MODEL_STATUS.LOADING;
+  const isLoading = model.status === MODEL_STATUS.LOADING;
   const isChecking = model.status === MODEL_STATUS.CHECKING;
-  const isReady    = model.status === MODEL_STATUS.READY;
-  const isError    = model.status === MODEL_STATUS.ERROR;
+  const isReady = model.status === MODEL_STATUS.READY;
+  const isError = model.status === MODEL_STATUS.ERROR;
   const hasProfile = !!model.hwProfile;
 
   return (
@@ -66,9 +67,9 @@ export default function Home() {
 
           <div className="feature-pills fade-in" style={{ animationDelay: '0.2s' }}>
             {[
-              { icon: <Cpu size={14} />,  label: 'WebGPU Accelerated' },
-              { icon: <Eye size={14} />,  label: 'Vision + OCR' },
-              { icon: <Mic size={14} />,  label: 'Whisper Audio' },
+              { icon: <Cpu size={14} />, label: 'WebGPU Accelerated' },
+              { icon: <Eye size={14} />, label: 'Vision + OCR' },
+              { icon: <Mic size={14} />, label: 'Whisper Audio' },
               { icon: <HardDrive size={14} />, label: 'OPFS Cached' },
             ].map(f => (
               <span key={f.label} className="feature-pill">
@@ -82,6 +83,29 @@ export default function Home() {
       {/* ── Setup card ── */}
       <section className="setup-section">
         <div className="setup-card card fade-in">
+
+          {/* SAB / COOP warning — shown when deployment headers are missing */}
+          {!model.sabAvailable && (
+            <div className="error-banner" style={{ marginBottom: 16 }}>
+              <AlertTriangle size={16} />
+              <span>
+                <strong>Browser isolation headers missing.</strong> Cross-Origin-Opener-Policy and
+                Cross-Origin-Embedder-Policy must be set on your server for WebLLM to work.
+                If you&apos;re on Vercel, add the included <code>vercel.json</code> to your project root.
+              </span>
+            </div>
+          )}
+
+          {/* Mobile notice */}
+          {model.isMobile && (
+            <div className="mobile-notice fade-in">
+              <Smartphone size={15} />
+              <span>
+                <strong>Mobile detected.</strong> Using the 1B model for stability —
+                prevents GPU memory crashes on mobile browsers.
+              </span>
+            </div>
+          )}
 
           {/* Hardware detection */}
           <div className="setup-block">
@@ -112,6 +136,9 @@ export default function Home() {
                     wide
                   />
                 )}
+                {model.hwProfile.mobileOverride && (
+                  <HWCard label="Mode" value="Mobile-Safe" accent="amber" wide />
+                )}
               </div>
             )}
 
@@ -124,7 +151,6 @@ export default function Home() {
 
           <div className="divider" />
 
-          {/* Model selection */}
           {isError && (
             <div className="error-banner">
               <AlertTriangle size={16} />
@@ -132,7 +158,8 @@ export default function Home() {
             </div>
           )}
 
-          {hasProfile && !isReady && (
+          {/* Model selection — hidden on mobile (always 1B) */}
+          {hasProfile && !isReady && !model.isMobile && (
             <div className="setup-block">
               <div className="setup-block-header">
                 <Zap size={18} className="text-cyan" />
@@ -173,57 +200,110 @@ export default function Home() {
                   ))}
                 </div>
               )}
-
-              <button
-                className="btn btn-primary btn-lg w-full"
-                onClick={handleLoad}
-                disabled={isLoading || !model.hwProfile?.supportsWebGPU}
-                style={{ marginTop: '16px' }}
-              >
-                {isLoading ? <><div className="spinner" style={{ borderTopColor: '#000' }} /> Loading…</> : <><Zap size={16} /> Launch Sentry AI</>}
-              </button>
-
-              {model.hwProfile && !model.hwProfile.supportsWebGPU && (
-                <p className="text-xs text-amber" style={{ marginTop: 8, textAlign: 'center' }}>
-                  WebGPU required. Use Chrome 113+ on a supported GPU.
-                </p>
-              )}
             </div>
           )}
 
-          {/* Loading progress : "The Secure Handshake" */}
+          {/* Mobile: show fixed model info */}
+          {hasProfile && !isReady && model.isMobile && !isLoading && (
+            <div className="setup-block">
+              <div className="setup-block-header">
+                <Zap size={18} className="text-cyan" />
+                <h3>Model</h3>
+              </div>
+              <div className="recommended-model">
+                <div className="rec-label">Mobile-Optimized</div>
+                <div className="rec-model-name">Llama 3.2 · 1B · Efficient</div>
+                <div className="rec-model-size text-muted text-sm">~0.9 GB · Stable on mobile GPU</div>
+              </div>
+            </div>
+          )}
+
+          {/* Launch button — shown when profile ready and not yet loading/ready */}
+          {hasProfile && !isReady && !isLoading && (
+            <button
+              className="btn btn-primary btn-lg w-full"
+              onClick={handleLoad}
+              disabled={!model.hwProfile?.supportsWebGPU || !model.sabAvailable}
+              style={{ marginTop: '16px' }}
+            >
+              <Zap size={16} /> Launch Sentry AI
+            </button>
+          )}
+
+          {hasProfile && !model.hwProfile.supportsWebGPU && (
+            <p className="text-xs text-amber" style={{ marginTop: 8, textAlign: 'center' }}>
+              WebGPU required. Use Chrome 113+ on a supported GPU.
+            </p>
+          )}
+
+          {/* ── Loading progress — FULLY MOBILE RESPONSIVE ── */}
           {isLoading && (
-            <div className="setup-block fade-in">
+            <div className="setup-block loading-block fade-in">
               <div className="divider" />
-              
-              <div className="setup-block-header" style={{ marginBottom: 16 }}>
+
+              <div className="loading-header">
                 <Shield size={20} className="text-emerald" />
                 <h3 className="text-emerald">Establishing Local Privacy</h3>
               </div>
 
-              <p className="text-sm" style={{ marginBottom: 16 }}>
-                Sentry AI is currently moving the AI Engine from your local hard drive into your GPU's Private Memory (VRAM).
-              </p>
-
-              <div className="progress-info" style={{ marginBottom: 8 }}>
-                <span className="text-xs text-cyan truncate" style={{ maxWidth: '80%' }}>
-                  Status: {model.progress.text || 'Loading from Disk (OPFS) ➔ GPU Memory...'}
-                </span>
-                <span className="text-sm text-cyan mono">{model.progress.percent}%</span>
-              </div>
-              
-              <div className="progress-bar">
-                <div className="progress-bar-fill" style={{ width: `${model.progress.percent}%`, background: 'var(--cyan)' }} />
-              </div>
-
-              <div style={{ background: 'rgba(255,255,255,0.03)', padding: '12px', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.05)', marginTop: '20px' }}>
-                <div style={{ marginBottom: 12 }}>
-                  <strong className="text-xs text-muted" style={{ display: 'block', marginBottom: 4 }}>Why this happens:</strong>
-                  <span className="text-xs text-muted" style={{ display: 'block', lineHeight: 1.4 }}>To ensure 100% privacy, the browser "forgets" the AI whenever you close the tab.</span>
+              {/* Progress display — mobile-safe layout */}
+              <div className="loading-progress-wrap">
+                <div className="loading-status-row">
+                  <span className="loading-status-text">
+                    {model.progress.text || 'Loading from storage → GPU…'}
+                  </span>
+                  <span className="loading-percent mono">{model.progress.percent}%</span>
                 </div>
-                <div>
-                  <strong className="text-xs text-muted" style={{ display: 'block', marginBottom: 4 }}>The 2026 Advantage:</strong>
-                  <span className="text-xs text-muted" style={{ display: 'block', lineHeight: 1.4 }}>Because you've already downloaded the model, this is a "Warm Boot" — it takes just seconds to verify and load, rather than 10 minutes to download. (First time setups will download the model).</span>
+
+                <div className="progress-bar" style={{ margin: '8px 0 4px' }}>
+                  <div
+                    className="progress-bar-fill"
+                    style={{
+                      width: `${model.progress.percent}%`,
+                      background: model.progress.percent === 100
+                        ? 'linear-gradient(90deg, var(--emerald), var(--cyan))'
+                        : 'var(--cyan)',
+                      transition: 'width 0.4s ease',
+                    }}
+                  />
+                </div>
+
+                {/* Stage indicator */}
+                <div className="loading-stages">
+                  {['Fetch', 'Compile', 'GPU Load', 'Ready'].map((stage, i) => {
+                    const pct = model.progress.percent;
+                    const done = (i === 0 && pct > 25) || (i === 1 && pct > 55) ||
+                      (i === 2 && pct > 85) || (i === 3 && pct === 100);
+                    const active = (i === 0 && pct <= 25) || (i === 1 && pct > 25 && pct <= 55) ||
+                      (i === 2 && pct > 55 && pct <= 85) || (i === 3 && pct > 85 && pct < 100);
+                    return (
+                      <div key={stage} className={`loading-stage ${done ? 'done' : active ? 'active' : ''}`}>
+                        <div className="stage-dot" />
+                        <span>{stage}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Info cards — stack on mobile */}
+              <div className="loading-info-grid">
+                <div className="loading-info-card">
+                  <strong className="text-xs text-cyan">Why this takes time</strong>
+                  <span className="text-xs text-muted">
+                    The browser loads the AI model from your local storage into GPU memory on every new session.
+                    This is intentional — it guarantees zero cloud calls.
+                  </span>
+                </div>
+                <div className="loading-info-card">
+                  <strong className="text-xs text-cyan">
+                    {model.isMobile ? '📱 Mobile Mode' : '⚡ Warm Boot'}
+                  </strong>
+                  <span className="text-xs text-muted">
+                    {model.isMobile
+                      ? 'Using 1B model with mobile-safe GPU settings to prevent crashes.'
+                      : 'Model is already cached — this is faster than re-downloading.'}
+                  </span>
                 </div>
               </div>
             </div>
@@ -237,7 +317,7 @@ export default function Home() {
               </div>
               <h3 style={{ color: 'var(--emerald)' }}>Sentry AI is Ready</h3>
               <p className="text-sm text-muted" style={{ margin: '8px 0 24px' }}>
-                Model loaded into WebGPU memory. You're now air-gapped capable.
+                Model loaded into WebGPU memory. You&apos;re now air-gapped capable.
               </p>
               <button className="btn btn-primary btn-lg" onClick={() => navigate('/chat')}>
                 Start Chatting <ChevronRight size={16} />
@@ -249,9 +329,9 @@ export default function Home() {
         {/* Privacy promise cards */}
         <div className="promise-grid">
           {[
-            { icon: <Lock size={20} className="text-cyan" />,    title: 'Zero Telemetry',   desc: 'No analytics, no tracking, no crash reports. Nothing.' },
+            { icon: <Lock size={20} className="text-cyan" />, title: 'Zero Telemetry', desc: 'No analytics, no tracking, no crash reports. Nothing.' },
             { icon: <HardDrive size={20} className="text-emerald" />, title: 'Local Storage', desc: 'All files, chats, and embeddings stay on your device.' },
-            { icon: <Shield size={20} className="text-purple" />, title: 'Air-Gap Ready',    desc: 'Works fully offline once the model is downloaded.' },
+            { icon: <Shield size={20} className="text-purple" />, title: 'Air-Gap Ready', desc: 'Works fully offline once the model is downloaded.' },
           ].map(p => (
             <div key={p.title} className="promise-card card">
               {p.icon}

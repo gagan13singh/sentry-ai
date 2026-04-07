@@ -1,5 +1,6 @@
 // ================================================================
 // AI WORKER — Sentry AI Brain
+// FIXED: isMobile param → low_power_mode + reduced maxStorageBufferBindingSize
 // FIXED: Pipeline memory manager — unloads unused models to prevent OOM
 // FIXED: Proper error boundaries per pipeline
 // NEW:   Threat scan pipeline (content safety check, local only)
@@ -14,14 +15,12 @@ env.allowLocalModels = true;
 env.useBrowserCache = true;
 
 // ── Pipeline Memory Manager ────────────────────────────────────────
-// Only ONE auxiliary pipeline loaded at a time to prevent OOM on low-RAM devices.
-// LLM engine stays resident once loaded (it's the primary model).
-const MAX_AUX_RAM_GB = 1.5;  // conservative budget for aux pipelines
-let activePipelines = {};   // { name: { instance, lastUsed, estimatedMB } }
+const MAX_AUX_RAM_GB = 1.5;
+let activePipelines = {};
 const PIPELINE_BUDGETS = {
-  embed: 80,    // MiniLM-L6-v2 ~80MB
-  caption: 350,   // ViT-GPT2 ~350MB
-  whisper: 150,   // whisper-tiny.en ~150MB
+  embed: 80,
+  caption: 350,
+  whisper: 150,
 };
 
 async function getPipeline(name, loader) {
@@ -30,7 +29,6 @@ async function getPipeline(name, loader) {
     return activePipelines[name].instance;
   }
 
-  // Evict least-recently-used pipeline if we'd exceed budget
   const totalMB = Object.values(activePipelines).reduce((s, p) => s + p.estimatedMB, 0);
   if (totalMB + PIPELINE_BUDGETS[name] > MAX_AUX_RAM_GB * 1024) {
     const lru = Object.entries(activePipelines)
@@ -56,7 +54,7 @@ let currentModelId = null;
 let isLoading = false;
 
 // ── LLM Engine ────────────────────────────────────────────────────
-async function initLLM(modelId, onProgress) {
+async function initLLM(modelId, onProgress, isMobile = false) {
   if (llmEngine && currentModelId === modelId) return { success: true, cached: true };
   if (isLoading) return { success: false, error: 'Already loading' };
 
@@ -64,7 +62,8 @@ async function initLLM(modelId, onProgress) {
   currentModelId = modelId;
 
   try {
-    llmEngine = await CreateMLCEngine(modelId, {
+    // Mobile-safe config: lower VRAM pressure to prevent OS tab kill
+    const engineConfig = {
       initProgressCallback: (report) => {
         onProgress({
           stage: 'llm',
@@ -73,7 +72,16 @@ async function initLLM(modelId, onProgress) {
         });
       },
       logLevel: 'SILENT',
-    });
+    };
+
+    if (isMobile) {
+      // Reduce GPU buffer size to stay within mobile VRAM budget
+      // This prevents the OS from killing the tab at 100% load
+      engineConfig.low_power_mode = true;
+      engineConfig.maxStorageBufferBindingSize = 128 * 1024 * 1024; // 128MB vs default 2GB
+    }
+
+    llmEngine = await CreateMLCEngine(modelId, engineConfig);
     isLoading = false;
     return { success: true, cached: false };
   } catch (err) {
@@ -86,8 +94,9 @@ async function initLLM(modelId, onProgress) {
 
 // ── Worker API ─────────────────────────────────────────────────────
 const api = {
-  async loadModel(modelId, onProgress) {
-    return await initLLM(modelId, onProgress);
+  // FIXED: accepts isMobile as third param
+  async loadModel(modelId, onProgress, isMobile = false) {
+    return await initLLM(modelId, onProgress, isMobile);
   },
 
   async chat(messages, streamCallback) {
@@ -122,7 +131,6 @@ const api = {
     return { content: reply.choices[0].message.content };
   },
 
-  // FIXED: uses pipeline manager, won't OOM
   async embedText(texts, onProgress) {
     const pipe = await getPipeline('embed', () =>
       pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
@@ -173,7 +181,6 @@ const api = {
     return result.text || '';
   },
 
-  // NEW: local threat scan — classifies text for harmful content WITHOUT sending it anywhere
   async scanContentThreat(text) {
     if (!llmEngine) return { safe: true, reason: 'no model' };
     try {

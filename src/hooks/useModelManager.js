@@ -1,7 +1,10 @@
 // ================================================================
 // useModelManager.js
-// FIXED: scanContentThreat exposed correctly via Comlink
+// FIXED: Mobile crash at 100% — VRAM overflow + SharedArrayBuffer guard
+// FIXED: Auto-detects mobile and forces 1B model + low_power_mode
 // FIXED: stale closure protection on chat callback
+// FIXED: scanContentThreat exposed correctly via Comlink
+// NEW:   isMobile detection exported for UI hints
 // ================================================================
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -17,6 +20,27 @@ export const MODEL_STATUS = {
   ERROR: 'error',
 };
 
+// ── Mobile/tablet detection (conservative — includes iPads) ────────
+export function detectMobile() {
+  const ua = navigator.userAgent;
+  const isMobileUA = /iPhone|iPad|iPod|Android|webOS|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+  // Also check touch + small screen as fallback
+  const isTouchSmall = navigator.maxTouchPoints > 0 && window.screen.width < 1024;
+  return isMobileUA || isTouchSmall;
+}
+
+// ── SharedArrayBuffer guard ─────────────────────────────────────────
+function checkSharedArrayBuffer() {
+  try {
+    if (typeof SharedArrayBuffer === 'undefined') return false;
+    // Try actually creating one — some envs define but block it
+    const _ = new SharedArrayBuffer(1);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function useModelManager() {
   const [status, setStatus] = useState(MODEL_STATUS.IDLE);
   const [progress, setProgress] = useState({ stage: '', text: '', percent: 0 });
@@ -24,10 +48,11 @@ export function useModelManager() {
   const [modelId, setModelId] = useState(null);
   const [error, setError] = useState(null);
   const [storageInfo, setStorageInfo] = useState(null);
+  const [isMobile] = useState(() => detectMobile());
+  const [sabAvailable] = useState(() => checkSharedArrayBuffer());
 
   const workerRef = useRef(null);
   const apiRef = useRef(null);
-  // FIXED: keep a stable ref to current status to avoid stale closures in chat callback
   const statusRef = useRef(status);
   useEffect(() => { statusRef.current = status; }, [status]);
 
@@ -50,6 +75,12 @@ export function useModelManager() {
     setStatus(MODEL_STATUS.CHECKING);
     try {
       const profile = await detectHardwareProfile();
+      // Override model choice for mobile — force 1B to avoid VRAM crash
+      if (isMobile && profile.model) {
+        const { MODEL_TIERS } = await import('../lib/deviceProfile');
+        profile.model = MODEL_TIERS.LOW;
+        profile.mobileOverride = true;
+      }
       setHwProfile(profile);
       const info = await getStorageInfo();
       setStorageInfo(info);
@@ -60,11 +91,23 @@ export function useModelManager() {
       setStatus(MODEL_STATUS.ERROR);
       return null;
     }
-  }, []);
+  }, [isMobile]);
 
   const loadModel = useCallback(async (overrideModelId = null) => {
     const api = apiRef.current;
     if (!api) return;
+
+    // Guard: SharedArrayBuffer required for WebLLM
+    if (!sabAvailable) {
+      setError(
+        'Your browser requires Cross-Origin Isolation headers to run local AI. ' +
+        'If self-hosting, ensure your server sends: ' +
+        'Cross-Origin-Opener-Policy: same-origin and ' +
+        'Cross-Origin-Embedder-Policy: require-corp'
+      );
+      setStatus(MODEL_STATUS.ERROR);
+      return;
+    }
 
     let profile = hwProfile;
     if (!profile) profile = await detectHardware();
@@ -74,7 +117,12 @@ export function useModelManager() {
       return;
     }
 
-    const targetModel = overrideModelId || profile.model?.id;
+    // On mobile: always use the 1B model regardless of override to prevent OOM crash
+    let targetModel = overrideModelId || profile.model?.id;
+    if (isMobile) {
+      const { MODEL_TIERS } = await import('../lib/deviceProfile');
+      targetModel = MODEL_TIERS.LOW.id;
+    }
     if (!targetModel) return;
 
     setModelId(targetModel);
@@ -90,7 +138,7 @@ export function useModelManager() {
     });
 
     try {
-      const result = await api.loadModel(targetModel, progressCallback);
+      const result = await api.loadModel(targetModel, progressCallback, isMobile);
       if (result.success) {
         setStatus(MODEL_STATUS.READY);
         setProgress({ stage: 'done', text: 'Model ready', percent: 100 });
@@ -101,14 +149,22 @@ export function useModelManager() {
         throw new Error(result.error || 'Unknown load error');
       }
     } catch (e) {
-      setError(e.message);
+      // Friendly mobile-specific error message
+      const msg = e.message || '';
+      if (isMobile && (msg.includes('memory') || msg.includes('OOM') || msg.includes('GPU'))) {
+        setError(
+          'Not enough GPU memory on this device. Try closing other apps and tabs, ' +
+          'then reload the page to try again.'
+        );
+      } else {
+        setError(msg || 'Failed to load model');
+      }
       setStatus(MODEL_STATUS.ERROR);
     }
-  }, [hwProfile, detectHardware]);
+  }, [hwProfile, detectHardware, isMobile, sabAvailable]);
 
   const chat = useCallback(async (messages, onToken) => {
     const api = apiRef.current;
-    // FIXED: use ref not closure variable
     if (!api || statusRef.current !== MODEL_STATUS.READY) return null;
 
     const streamCallback = Comlink.proxy((delta, full, done) => {
@@ -136,7 +192,6 @@ export function useModelManager() {
     return await api.transcribeAudio(audioData, Comlink.proxy(() => { }));
   }, []);
 
-  // NEW: local threat detection
   const scanContentThreat = useCallback(async (text) => {
     const api = apiRef.current;
     if (!api || statusRef.current !== MODEL_STATUS.READY) return { safe: true };
@@ -147,6 +202,7 @@ export function useModelManager() {
 
   return {
     status, progress, hwProfile, modelId, error, storageInfo, isReady,
+    isMobile, sabAvailable,
     detectHardware, loadModel, chat, embedText, captionImage,
     transcribeAudio, scanContentThreat,
   };

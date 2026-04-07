@@ -1,6 +1,7 @@
 // ================================================================
 // deviceProfile.js — Hardware-Aware Model Selection
 // Uses navigator.deviceMemory + WebGPU adapter info to pick model
+// MODEL_TIERS exported as named export (used by useModelManager mobile override)
 // ================================================================
 
 export const MODEL_TIERS = {
@@ -20,12 +21,10 @@ export const MODEL_TIERS = {
 
 /**
  * Probes hardware capabilities and returns the best model config.
- * @returns {Promise<{tier: string, model: object, ram: number, gpu: object|null, supportsWebGPU: boolean}>}
  */
 export async function detectHardwareProfile() {
   // ── RAM detection ────────────────────────────────────────────────
-  // navigator.deviceMemory is 0.25, 0.5, 1, 2, 4, 8 (capped at 8 by spec)
-  const ram = navigator.deviceMemory ?? 4; // default 4GB if API unavailable
+  const ram = navigator.deviceMemory ?? 4;
 
   // ── WebGPU detection ─────────────────────────────────────────────
   let gpuInfo = null;
@@ -46,7 +45,7 @@ export async function detectHardwareProfile() {
           description: info.description || 'WebGPU GPU',
         };
       }
-    } catch (e) {
+    } catch {
       supportsWebGPU = false;
     }
   }
