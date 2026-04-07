@@ -1,29 +1,15 @@
 // ================================================================
-// Home.jsx — Onboarding / Model Loader page
-// CHANGED: Static "Hardware Detection + Model Selection" setup block
-//          replaced with <Diagnostic /> — the animated security scan.
-// CHANGED: Sidebar nav label updated to "Home" (was "Setup").
-// KEPT:    Hero section, promise grid, ready state, loading state.
+// Home.jsx — Onboarding / Model Loader page (PROD UI)
+// Layout: Hero → Diagnostic setup card → Promise grid
+// The Diagnostic component handles all scan + model selection logic
 // ================================================================
 
-import { useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Shield, Cpu, Zap, Eye, Mic, Lock, ChevronRight, CheckCircle, HardDrive } from 'lucide-react';
-import { useApp } from '../App';
-import { MODEL_STATUS } from '../hooks/useModelManager';
+import { Lock, Cpu, Eye, Mic, HardDrive, Shield } from 'lucide-react';
 import Diagnostic from '../components/Diagnostic';
 import '../App.css';
+import '../pages/pages.css';
 
 export default function Home() {
-  const { model } = useApp();
-  const navigate = useNavigate();
-
-  const isReady = model.status === MODEL_STATUS.READY;
-
-  // Auto-navigate to chat on model ready (optional — remove if you prefer manual nav)
-  // Kept commented so the "Ready" card is always visible.
-  // useEffect(() => { if (isReady) navigate('/chat'); }, [isReady]);
-
   return (
     <div className="home-page">
 
@@ -61,40 +47,13 @@ export default function Home() {
         </div>
       </section>
 
-      {/* ── Setup / Diagnostic card ── */}
+      {/* ── Setup card containing the Diagnostic scan ── */}
       <section className="setup-section">
         <div className="setup-card card fade-in">
-
-          {/* ── Diagnostic scan (handles everything pre-launch) ── */}
-          {!isReady && <Diagnostic />}
-
-          {/* ── Ready state ── */}
-          {isReady && (
-            <div className="ready-state fade-in">
-              <div className="ready-icon">
-                <CheckCircle size={40} className="text-emerald" />
-              </div>
-              <h3 style={{ color: 'var(--emerald)' }}>Sentry AI is Ready</h3>
-              <p className="text-sm text-muted" style={{ margin: '8px 0 8px' }}>
-                Model loaded into WebGPU memory. You&apos;re now air-gapped capable.
-              </p>
-              {/* Show which engine is loaded */}
-              {model.modelId && (
-                <p className="text-xs text-muted" style={{ margin: '0 0 20px' }}>
-                  Engine:{' '}
-                  <span style={{ color: 'var(--cyan)', fontFamily: 'monospace' }}>
-                    {model.modelId.includes('3B') ? '⚡ Sentry Turbo (3B)' : '🍃 Sentry Lite (1B)'}
-                  </span>
-                </p>
-              )}
-              <button className="btn btn-primary btn-lg" onClick={() => navigate('/chat')}>
-                Start Chatting <ChevronRight size={16} />
-              </button>
-            </div>
-          )}
+          <Diagnostic />
         </div>
 
-        {/* ── Privacy promise cards (unchanged) ── */}
+        {/* ── Promise cards ── */}
         <div className="promise-grid">
           {[
             {

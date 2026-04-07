@@ -1,42 +1,22 @@
 // ================================================================
 // useModelManager.js
-// FIXED: 2-3 msg crash → WebGPU context loss recovery (no re-download)
-// FIXED: KV cache / context_window constrained on mobile
-// FIXED: isReady never flips to false on context loss — graceful recover
-// NEW:   MODEL_STATUS.RECOVERING — shows "reconnecting" instead of setup
-// NEW:   recoverEngine() — re-inits from cache in ~5-15s
+// FIXED: Passes device ('webgpu' | 'wasm') to worker loadModel
+// FIXED: scanContentThreat exposed correctly via Comlink
+// FIXED: stale closure protection on chat callback
 // ================================================================
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as Comlink from 'comlink';
 import { detectHardwareProfile } from '../lib/deviceProfile';
-import { markModelCached, getStorageInfo } from '../lib/opfs';
+import { isModelCached, markModelCached, getStorageInfo } from '../lib/opfs';
 
 export const MODEL_STATUS = {
   IDLE: 'idle',
   CHECKING: 'checking',
   LOADING: 'loading',
   READY: 'ready',
-  RECOVERING: 'recovering', // context lost, re-loading from cache
   ERROR: 'error',
 };
-
-export function detectMobile() {
-  const ua = navigator.userAgent;
-  const isMobileUA = /iPhone|iPad|iPod|Android|webOS|BlackBerry|IEMobile|Opera Mini/i.test(ua);
-  const isTouchSmall = navigator.maxTouchPoints > 0 && window.screen.width < 1024;
-  return isMobileUA || isTouchSmall;
-}
-
-function checkSharedArrayBuffer() {
-  try {
-    if (typeof SharedArrayBuffer === 'undefined') return false;
-    new SharedArrayBuffer(1);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 export function useModelManager() {
   const [status, setStatus] = useState(MODEL_STATUS.IDLE);
@@ -45,19 +25,11 @@ export function useModelManager() {
   const [modelId, setModelId] = useState(null);
   const [error, setError] = useState(null);
   const [storageInfo, setStorageInfo] = useState(null);
-  const [engineLost, setEngineLost] = useState(false);
-  const [isMobile] = useState(() => detectMobile());
-  const [sabAvailable] = useState(() => checkSharedArrayBuffer());
 
   const workerRef = useRef(null);
   const apiRef = useRef(null);
   const statusRef = useRef(status);
-  const modelIdRef = useRef(modelId);
-  // Prevent concurrent recovery attempts
-  const recoveringRef = useRef(false);
-
   useEffect(() => { statusRef.current = status; }, [status]);
-  useEffect(() => { modelIdRef.current = modelId; }, [modelId]);
 
   useEffect(() => {
     const worker = new Worker(
@@ -66,6 +38,7 @@ export function useModelManager() {
     );
     workerRef.current = worker;
     apiRef.current = Comlink.wrap(worker);
+
     return () => {
       worker.terminate();
       workerRef.current = null;
@@ -77,11 +50,6 @@ export function useModelManager() {
     setStatus(MODEL_STATUS.CHECKING);
     try {
       const profile = await detectHardwareProfile();
-      if (isMobile && profile.model) {
-        const { MODEL_TIERS } = await import('../lib/deviceProfile');
-        profile.model = MODEL_TIERS.LOW;
-        profile.mobileOverride = true;
-      }
       setHwProfile(profile);
       const info = await getStorageInfo();
       setStorageInfo(info);
@@ -92,37 +60,35 @@ export function useModelManager() {
       setStatus(MODEL_STATUS.ERROR);
       return null;
     }
-  }, [isMobile]);
+  }, []);
 
   const loadModel = useCallback(async (overrideModelId = null) => {
     const api = apiRef.current;
     if (!api) return;
 
-    if (!sabAvailable) {
-      setError('SharedArrayBuffer unavailable — add vercel.json with COOP/COEP headers.');
-      setStatus(MODEL_STATUS.ERROR);
-      return;
-    }
-
     let profile = hwProfile;
     if (!profile) profile = await detectHardware();
-    if (!profile?.supportsWebGPU) {
-      setError('WebGPU not supported. Use Chrome 113+ on a compatible GPU.');
+
+    // FIXED: No longer hard-fail on missing WebGPU — WASM fallback handles it
+    if (!profile) {
+      setError('Could not detect hardware profile.');
       setStatus(MODEL_STATUS.ERROR);
       return;
     }
 
-    let targetModel = overrideModelId || profile.model?.id;
-    if (isMobile) {
-      const { MODEL_TIERS } = await import('../lib/deviceProfile');
-      targetModel = MODEL_TIERS.LOW.id;
+    const targetModel = overrideModelId || profile.model?.id;
+    if (!targetModel) {
+      setError('No compatible model found for this device.');
+      setStatus(MODEL_STATUS.ERROR);
+      return;
     }
-    if (!targetModel) return;
+
+    // FIXED: Determine device from profile (webgpu or wasm)
+    const device = profile.model?.device || (profile.supportsWebGPU && !profile.isFallbackAdapter ? 'webgpu' : 'wasm');
 
     setModelId(targetModel);
     setStatus(MODEL_STATUS.LOADING);
     setError(null);
-    setEngineLost(false);
 
     const progressCallback = Comlink.proxy((p) => {
       setProgress({
@@ -133,7 +99,8 @@ export function useModelManager() {
     });
 
     try {
-      const result = await api.loadModel(targetModel, progressCallback, isMobile);
+      // FIXED: Pass device to worker
+      const result = await api.loadModel(targetModel, device, progressCallback);
       if (result.success) {
         setStatus(MODEL_STATUS.READY);
         setProgress({ stage: 'done', text: 'Model ready', percent: 100 });
@@ -144,98 +111,21 @@ export function useModelManager() {
         throw new Error(result.error || 'Unknown load error');
       }
     } catch (e) {
-      const msg = e.message || '';
-      if (isMobile && (msg.includes('memory') || msg.includes('OOM') || msg.includes('GPU'))) {
-        setError('Not enough GPU memory. Close other apps/tabs and try again.');
-      } else {
-        setError(msg || 'Failed to load model');
-      }
+      setError(e.message);
       setStatus(MODEL_STATUS.ERROR);
     }
-  }, [hwProfile, detectHardware, isMobile, sabAvailable]);
+  }, [hwProfile, detectHardware]);
 
-  // ── Recover from WebGPU context loss without re-downloading ──────
-  // Called automatically when chat() detects a GPU crash.
-  // Uses the already-cached model — takes ~5-15s, not 60s+.
-  const recoverEngine = useCallback(async () => {
-    if (recoveringRef.current) return false;
-    const api = apiRef.current;
-    const currentId = modelIdRef.current;
-    if (!api || !currentId) {
-      setStatus(MODEL_STATUS.IDLE);
-      return false;
-    }
-
-    recoveringRef.current = true;
-    setStatus(MODEL_STATUS.RECOVERING);
-    setEngineLost(true);
-
-    try {
-      const result = await api.recoverEngine(currentId, isMobile);
-      recoveringRef.current = false;
-      if (result.success) {
-        setStatus(MODEL_STATUS.READY);
-        setEngineLost(false);
-        return true;
-      }
-      throw new Error(result.error || 'Recovery failed');
-    } catch (e) {
-      recoveringRef.current = false;
-      setError('GPU context lost. Tap "Reload Model" — your cache is intact, no re-download needed.');
-      setStatus(MODEL_STATUS.ERROR);
-      return false;
-    }
-  }, [isMobile]);
-
-  // ── chat with automatic context-loss detection & recovery ─────────
   const chat = useCallback(async (messages, onToken) => {
     const api = apiRef.current;
-    if (!api) return null;
+    if (!api || statusRef.current !== MODEL_STATUS.READY) return null;
 
-    // If already recovering, wait for it
-    if (statusRef.current === MODEL_STATUS.RECOVERING) {
-      await new Promise((resolve) => {
-        const t = setInterval(() => {
-          if (statusRef.current !== MODEL_STATUS.RECOVERING) {
-            clearInterval(t);
-            resolve();
-          }
-        }, 250);
-        setTimeout(() => { clearInterval(t); resolve(); }, 30000);
-      });
-    }
-
-    if (statusRef.current !== MODEL_STATUS.READY) return null;
-
-    const streamCallback = Comlink.proxy((delta, full, done, contextLost) => {
-      if (contextLost) {
-        recoverEngine();
-        return;
-      }
+    const streamCallback = Comlink.proxy((delta, full, done) => {
       onToken?.(delta, full, done);
     });
 
-    try {
-      const result = await api.chat(messages, streamCallback);
-      if (result?.contextLost) {
-        recoverEngine();
-        return null;
-      }
-      return result;
-    } catch (e) {
-      const msg = (e.message || '').toLowerCase();
-      const isGPUCrash =
-        msg.includes('context') || msg.includes('gpu') ||
-        msg.includes('device lost') || msg.includes('webgpu') ||
-        msg.includes('invalid') || msg.includes('destroyed') ||
-        msg.includes('lost');
-      if (isGPUCrash) {
-        recoverEngine();
-        return null;
-      }
-      throw e;
-    }
-  }, [recoverEngine]);
+    return await api.chat(messages, streamCallback);
+  }, []);
 
   const embedText = useCallback(async (text) => {
     const api = apiRef.current;
@@ -262,13 +152,10 @@ export function useModelManager() {
   }, []);
 
   const isReady = status === MODEL_STATUS.READY;
-  const isRecovering = status === MODEL_STATUS.RECOVERING;
 
   return {
-    status, progress, hwProfile, modelId, error, storageInfo,
-    isReady, isRecovering, engineLost,
-    isMobile, sabAvailable,
-    detectHardware, loadModel, recoverEngine,
-    chat, embedText, captionImage, transcribeAudio, scanContentThreat,
+    status, progress, hwProfile, modelId, error, storageInfo, isReady,
+    detectHardware, loadModel, chat, embedText, captionImage,
+    transcribeAudio, scanContentThreat,
   };
 }

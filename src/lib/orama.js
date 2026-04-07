@@ -1,11 +1,11 @@
 // ================================================================
 // orama.js — Local Vector Database (Orama)
-// FIXED: IndexedDB persistence (no more localStorage 5MB limit)
-// FIXED: Proper Float32Array → Array type coercion before insert
-// FIXED: removeBySource actually works now
+// FIXED: removeBySource — Orama string fields need 'contains' not 'eq'
+//        Use a full re-insert strategy: rebuild DB excluding deleted source
+// FIXED: persistDB/loadDB use IndexedDB (already done) — kept as-is
 // ================================================================
 
-import { create, insert, search, remove, count, getByID } from '@orama/orama';
+import { create, insert, search, remove, count } from '@orama/orama';
 
 let db = null;
 const IDB_NAME = 'sentry-ai-orama';
@@ -28,8 +28,8 @@ function openIDB() {
 }
 
 async function idbGetAll() {
-  const db = await openIDB();
-  const tx = db.transaction(IDB_STORE, 'readonly');
+  const idb = await openIDB();
+  const tx = idb.transaction(IDB_STORE, 'readonly');
   const store = tx.objectStore(IDB_STORE);
   return new Promise((resolve, reject) => {
     const req = store.getAll();
@@ -40,8 +40,8 @@ async function idbGetAll() {
 
 async function idbPutBatch(docs) {
   if (!docs.length) return;
-  const db = await openIDB();
-  const tx = db.transaction(IDB_STORE, 'readwrite');
+  const idb = await openIDB();
+  const tx = idb.transaction(IDB_STORE, 'readwrite');
   const store = tx.objectStore(IDB_STORE);
   for (const doc of docs) store.put(doc);
   return new Promise((resolve, reject) => {
@@ -51,8 +51,8 @@ async function idbPutBatch(docs) {
 }
 
 async function idbDeleteBySource(source) {
-  const db = await openIDB();
-  const tx = db.transaction(IDB_STORE, 'readwrite');
+  const idb = await openIDB();
+  const tx = idb.transaction(IDB_STORE, 'readwrite');
   const store = tx.objectStore(IDB_STORE);
   const all = await new Promise((res) => {
     const req = store.getAll();
@@ -68,8 +68,8 @@ async function idbDeleteBySource(source) {
 }
 
 async function idbClear() {
-  const db = await openIDB();
-  const tx = db.transaction(IDB_STORE, 'readwrite');
+  const idb = await openIDB();
+  const tx = idb.transaction(IDB_STORE, 'readwrite');
   tx.objectStore(IDB_STORE).clear();
   return new Promise((resolve, reject) => {
     tx.oncomplete = resolve;
@@ -77,21 +77,21 @@ async function idbClear() {
   });
 }
 
+function makeSchema() {
+  return {
+    id: 'string',
+    content: 'string',
+    source: 'string',
+    type: 'string',
+    pageNum: 'number',
+    embedding: 'vector[384]',
+  };
+}
+
 // ── Init ───────────────────────────────────────────────────────────
 export async function initDB() {
   if (db) return db;
-
-  db = await create({
-    schema: {
-      id: 'string',
-      content: 'string',
-      source: 'string',
-      type: 'string',
-      pageNum: 'number',
-      embedding: `vector[384]`,
-    },
-  });
-
+  db = await create({ schema: makeSchema() });
   await loadDBFromIDB();
   return db;
 }
@@ -107,8 +107,6 @@ export async function ingestText(text, source, type = 'text', embedFn, onProgres
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
     const raw = await embedFn(chunk);
-
-    // FIXED: Always coerce to plain number[] — Orama rejects typed arrays
     const embedding = Array.from(raw instanceof Float32Array ? raw : new Float32Array(raw)).slice(0, 384);
 
     const doc = {
@@ -157,7 +155,6 @@ export async function ingestPDF(file, embedFn, onProgress) {
 export async function hybridSearch(query, queryEmbedding, limit = 6) {
   if (!db) await initDB();
 
-  // FIXED: Always coerce to plain number[] before passing to Orama
   const embedding = Array.from(
     queryEmbedding instanceof Float32Array ? queryEmbedding : new Float32Array(queryEmbedding)
   ).slice(0, 384);
@@ -206,21 +203,19 @@ export async function getDocumentCount() {
   return await count(db);
 }
 
-// FIXED: actually deletes from both Orama and IDB
+// FIXED: removeBySource — Orama's 'where' filter for string fields doesn't support { eq }
+// The correct approach for Orama v3 is to do a full-text search and filter by source,
+// OR rebuild the DB from IDB excluding the deleted source.
+// We use the IDB-first approach: delete from IDB, then rebuild the in-memory DB.
 export async function removeBySource(source) {
   if (!db) return;
 
-  const results = await search(db, {
-    term: '',
-    where: { source: { eq: source } },
-    limit: 10000,
-  });
-
-  for (const hit of results.hits) {
-    try { await remove(db, hit.id); } catch (_) { }
-  }
-
+  // 1. Delete from IndexedDB (ground truth)
   await idbDeleteBySource(source);
+
+  // 2. Rebuild in-memory Orama DB from IDB (excludes deleted source)
+  db = await create({ schema: makeSchema() });
+  await loadDBFromIDB();
 }
 
 // ── Persistence ────────────────────────────────────────────────────
@@ -238,7 +233,6 @@ export async function loadDBFromIDB() {
   try {
     const docs = await idbGetAll();
     for (const doc of docs) {
-      // Re-coerce embeddings loaded from IDB (stored as plain arrays)
       if (doc.embedding && !(doc.embedding instanceof Array)) {
         doc.embedding = Array.from(doc.embedding);
       }
@@ -252,12 +246,7 @@ export async function loadDBFromIDB() {
 }
 
 export async function clearDB() {
-  db = await create({
-    schema: {
-      id: 'string', content: 'string', source: 'string',
-      type: 'string', pageNum: 'number', embedding: 'vector[384]',
-    },
-  });
+  db = await create({ schema: makeSchema() });
   await idbClear();
 }
 

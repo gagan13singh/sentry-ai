@@ -1,9 +1,8 @@
 // ================================================================
 // deviceProfile.js — Hardware-Aware Model Selection
-// ADDED: generateSessionKey()   — SENTRY_LOCAL_XXXX (RAM-only, never persisted)
-// ADDED: getCachedProfile()     — localStorage cache keyed to browser version
-// ADDED: setCachedProfile()     — saves profile so re-scan only on browser update
-// ADDED: clearCachedProfile()   — called when user clears app data
+// FIXED: Added WASM fallback tier for devices without WebGPU
+// FIXED: isFallbackAdapter detection for budget Android phones
+// FIXED: SharedArrayBuffer availability check (COOP/COEP requirement)
 // ================================================================
 
 export const MODEL_TIERS = {
@@ -11,118 +10,60 @@ export const MODEL_TIERS = {
     id: 'Llama-3.2-3B-Instruct-q4f16_1-MLC',
     label: 'Llama 3.2 · 3B · High Quality',
     shortLabel: 'Sentry Turbo',
-    tagline: 'AI Engine 3.0 · Best for complex reasoning',
+    tagline: 'AI engine #1 — best for complex reasoning',
     size: '2.1 GB',
-    minRam: 8,
     icon: '⚡',
+    minRam: 8,
+    device: 'webgpu',
   },
   LOW: {
     id: 'Llama-3.2-1B-Instruct-q4f16_1-MLC',
     label: 'Llama 3.2 · 1B · Efficient',
     shortLabel: 'Sentry Lite',
-    tagline: 'Privacy Mode · Best for battery & older devices',
+    tagline: 'Privacy-first — great for battery & older devices',
     size: '0.9 GB',
-    minRam: 0,
     icon: '🍃',
+    minRam: 0,
+    device: 'webgpu',
+  },
+  // WASM fallback for devices without WebGPU (e.g. Realme, older Android)
+  WASM: {
+    id: 'Qwen2.5-0.5B-Instruct-q4f16_1-MLC',
+    label: 'Qwen 2.5 · 0.5B · CPU/WASM Mode',
+    shortLabel: 'Sentry CPU',
+    tagline: 'Runs on any device — no GPU required',
+    size: '0.4 GB',
+    icon: '🧠',
+    minRam: 0,
+    device: 'wasm',
+    isFallback: true,
   },
 };
 
-// ── Browser fingerprint (used as cache key so re-scan fires on Chrome updates) ──
-function getBrowserFingerprint() {
-  const ua = navigator.userAgent;
-  const chrome = ua.match(/Chrome\/(\d+)/);
-  const firefox = ua.match(/Firefox\/(\d+)/);
-  const safari = ua.match(/Version\/(\d+).*Safari/);
-  if (chrome) return `chrome-${chrome[1]}`;
-  if (firefox) return `firefox-${firefox[1]}`;
-  if (safari) return `safari-${safari[1]}`;
-  return 'browser-unknown';
-}
-
-const CACHE_KEY_PREFIX = 'sentry_hw_profile_';
-
-/**
- * Returns a cached hardware profile if the browser version matches.
- * Returns null on first visit or after a browser update — triggers a fresh scan.
- */
-export function getCachedProfile() {
-  try {
-    const key = CACHE_KEY_PREFIX + getBrowserFingerprint();
-    const raw = localStorage.getItem(key);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    // Expire after 7 days just in case (driver updates, etc.)
-    if (Date.now() - (parsed.cachedAt || 0) > 7 * 24 * 60 * 60 * 1000) {
-      localStorage.removeItem(key);
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Persists the hardware profile to localStorage, keyed by browser version.
- * Only the capability flags are stored — no personal data.
- */
-export function setCachedProfile(profile) {
-  try {
-    // Clean up any stale entries from old browser versions
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith(CACHE_KEY_PREFIX)) {
-        localStorage.removeItem(k);
-      }
-    }
-    const key = CACHE_KEY_PREFIX + getBrowserFingerprint();
-    const toStore = {
-      tier: profile.tier,
-      ram: profile.ram,
-      supportsWebGPU: profile.supportsWebGPU,
-      gpuInfo: profile.gpuInfo,
-      mobileOverride: profile.mobileOverride || false,
-      cachedAt: Date.now(),
-    };
-    localStorage.setItem(key, JSON.stringify(toStore));
-  } catch {
-    // localStorage quota exceeded or unavailable — non-fatal
-  }
-}
-
-/** Wipes the cached profile so the next page load re-runs the full scan. */
-export function clearCachedProfile() {
-  try {
-    for (let i = localStorage.length - 1; i >= 0; i--) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith(CACHE_KEY_PREFIX)) localStorage.removeItem(k);
-    }
-  } catch { }
-}
-
-/**
- * Generates a one-time session identifier that lives only in RAM.
- * It is never written to localStorage, IndexedDB, or sent over the network.
- * Displayed in the Diagnostic UI as a "Security Theater" trust signal.
- *
- * Format: SENTRY_LOCAL_XXXXXXXXXXXX
- */
-export function generateSessionKey() {
-  const raw = crypto.randomUUID().replace(/-/g, '').toUpperCase();
-  return `SENTRY_LOCAL_${raw.slice(0, 12)}`;
-}
-
 /**
  * Probes hardware capabilities and returns the best model config.
- * Unchanged from original — still used by useModelManager.
+ * @returns {Promise<{tier, model, ram, gpuInfo, supportsWebGPU, isFallbackAdapter, hasSharedArrayBuffer, warnings}>}
  */
 export async function detectHardwareProfile() {
+  const warnings = [];
+
+  // ── SharedArrayBuffer check (COOP/COEP headers required by WebLLM) ──
+  const hasSharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined';
+  if (!hasSharedArrayBuffer) {
+    warnings.push({
+      type: 'missing_sab',
+      message: 'SharedArrayBuffer unavailable — COOP/COEP headers missing. WebLLM will fail silently. Deploy with Cross-Origin-Isolation headers.',
+      severity: 'critical',
+    });
+  }
+
   // ── RAM detection ────────────────────────────────────────────────
   const ram = navigator.deviceMemory ?? 4;
 
   // ── WebGPU detection ─────────────────────────────────────────────
   let gpuInfo = null;
   let supportsWebGPU = false;
+  let isFallbackAdapter = false;
 
   if (typeof navigator.gpu !== 'undefined') {
     try {
@@ -131,24 +72,52 @@ export async function detectHardwareProfile() {
       });
       if (adapter) {
         supportsWebGPU = true;
-        const info = adapter.info || (await adapter.requestAdapterInfo?.()) || {};
+
+        const info = adapter.info || await adapter.requestAdapterInfo?.() || {};
         gpuInfo = {
           vendor: info.vendor || 'Unknown',
           architecture: info.architecture || 'Unknown',
           device: info.device || 'Unknown',
           description: info.description || 'WebGPU GPU',
         };
+
+        // FIXED: Detect software/fallback adapters (common on budget Android)
+        // isFallbackAdapter means it's a CPU-emulated WebGPU — too slow for 3B models
+        isFallbackAdapter = !!(
+          adapter.isFallbackAdapter ||
+          (info.vendor || '').toLowerCase().includes('google') && (info.architecture || '').toLowerCase().includes('swiftshader') ||
+          (info.description || '').toLowerCase().includes('llvmpipe') ||
+          (info.description || '').toLowerCase().includes('softpipe') ||
+          (info.description || '').toLowerCase().includes('swiftshader')
+        );
+
+        if (isFallbackAdapter) {
+          warnings.push({
+            type: 'fallback_adapter',
+            message: 'WebGPU is running in software emulation mode (SwiftShader/LLVMPipe). Performance will be very slow. CPU/WASM mode recommended.',
+            severity: 'warning',
+          });
+        }
       }
-    } catch {
+    } catch (e) {
       supportsWebGPU = false;
     }
   }
 
   // ── Tier selection ───────────────────────────────────────────────
   let tier, model;
-  if (!supportsWebGPU) {
-    tier = 'NO_GPU';
-    model = null;
+
+  if (!supportsWebGPU || isFallbackAdapter || !hasSharedArrayBuffer) {
+    // FIXED: Fall through to WASM instead of hard-failing
+    tier = 'WASM';
+    model = MODEL_TIERS.WASM;
+    if (!supportsWebGPU) {
+      warnings.push({
+        type: 'no_webgpu',
+        message: 'WebGPU not available. Falling back to CPU/WASM mode with a smaller model.',
+        severity: 'info',
+      });
+    }
   } else if (ram >= 8) {
     tier = 'HIGH';
     model = MODEL_TIERS.HIGH;
@@ -157,10 +126,68 @@ export async function detectHardwareProfile() {
     model = MODEL_TIERS.LOW;
   }
 
-  return { tier, model, ram, gpuInfo, supportsWebGPU };
+  return {
+    tier,
+    model,
+    ram,
+    gpuInfo,
+    supportsWebGPU,
+    isFallbackAdapter,
+    hasSharedArrayBuffer,
+    warnings,
+  };
 }
 
-/** Returns all available model options for manual selection. */
+/**
+ * Returns all available model options for manual selection.
+ */
 export function getAllModels() {
   return Object.values(MODEL_TIERS);
+}
+
+// ── Session key & profile cache helpers ─────────────────────────────
+const PROFILE_CACHE_KEY = 'sentry_hw_profile_v2';
+
+/**
+ * Generates a short random session key (stays only in RAM — never persisted).
+ */
+export function generateSessionKey() {
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  return (
+    'SENTRY_LOCAL_' +
+    Array.from(bytes)
+      .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
+      .join('')
+  );
+}
+
+/**
+ * Returns a cached hardware profile if it exists and was generated with the
+ * same browser version (to trigger a re-scan on browser updates).
+ */
+export function getCachedProfile() {
+  try {
+    const raw = sessionStorage.getItem(PROFILE_CACHE_KEY);
+    if (!raw) return null;
+    const cached = JSON.parse(raw);
+    // Invalidate if browser version has changed
+    if (cached.userAgent !== navigator.userAgent) return null;
+    return cached;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persists a hardware profile to sessionStorage (cleared on tab close).
+ */
+export function setCachedProfile(profile) {
+  try {
+    sessionStorage.setItem(
+      PROFILE_CACHE_KEY,
+      JSON.stringify({ ...profile, userAgent: navigator.userAgent })
+    );
+  } catch {
+    // sessionStorage may be unavailable in some contexts — silently ignore
+  }
 }

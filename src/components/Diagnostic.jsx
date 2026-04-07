@@ -13,7 +13,8 @@
 // ================================================================
 
 import { useEffect, useState, useRef } from 'react';
-import { Shield, Cpu, Zap, ChevronDown, ChevronUp, RefreshCw, ExternalLink } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Shield, CheckCircle, Zap, ChevronDown, ChevronUp, RefreshCw, ExternalLink, ChevronRight } from 'lucide-react';
 import { useApp } from '../App';
 import { MODEL_STATUS } from '../hooks/useModelManager';
 import { MODEL_TIERS, generateSessionKey, getCachedProfile, setCachedProfile } from '../lib/deviceProfile';
@@ -86,6 +87,7 @@ async function probeWebGPU() {
 // ── Main component ───────────────────────────────────────────────────────────
 export default function Diagnostic() {
     const { model } = useApp();
+    const navigate = useNavigate();
 
     const [stepStatuses, setStepStatuses] = useState(SCAN_STEPS.map(() => 'pending'));
     const [stepResults, setStepResults] = useState(SCAN_STEPS.map(() => null));
@@ -189,8 +191,10 @@ export default function Diagnostic() {
 
     // ── Resolve model choice and mark scan complete ───────────────────────────
     function finaliseScan() {
-        const { webGPU, ram } = scanData.current;
-        if (webGPU && ram >= 8) {
+        const { webGPU, ram, sabOk } = scanData.current;
+        if (!webGPU || !sabOk) {
+            setSelectedModel(MODEL_TIERS.WASM.id);
+        } else if (webGPU && ram >= 8) {
             setSelectedModel(MODEL_TIERS.HIGH.id);
         } else {
             setSelectedModel(MODEL_TIERS.LOW.id);
@@ -229,7 +233,8 @@ export default function Diagnostic() {
     const isError = model.status === MODEL_STATUS.ERROR;
     const gpuOk = scanData.current.webGPU;
     const sabOk = scanData.current.sabOk;
-    const canLaunch = scanDone && !isLoading && !isReady && sabOk;
+    // WASM can always launch (no GPU required); GPU mode also needs sabOk
+    const canLaunch = scanDone && !isLoading && !isReady && (sabOk || selectedModel === MODEL_TIERS.WASM.id);
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
@@ -354,7 +359,7 @@ export default function Diagnostic() {
                         </div>
                     )}
 
-                    {/* GPU found → show both model options */}
+                    {/* GPU found → show both WebGPU model options */}
                     {gpuOk && sabOk && !isLoading && (
                         <>
                             <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '0 0 10px', textAlign: 'center' }}>
@@ -377,28 +382,21 @@ export default function Diagnostic() {
                         </>
                     )}
 
-                    {/* GPU not found → silent Lite selection + unlock guide */}
+                    {/* No GPU / SAB ok → WASM CPU card + optional unlock guide */}
                     {!gpuOk && sabOk && !isLoading && (
                         <div style={{ marginBottom: 16 }}>
-                            <div style={{
-                                background: 'rgba(251,191,36,0.08)',
-                                border: '1px solid rgba(251,191,36,0.25)',
-                                borderRadius: 8, padding: '10px 14px', marginBottom: 10,
-                            }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                                    <span style={{ fontSize: 16 }}>🍃</span>
-                                    <strong style={{ color: 'var(--text-primary)', fontSize: 13 }}>
-                                        Activating High-Efficiency CPU Engine
-                                    </strong>
-                                </div>
-                                <p style={{ margin: 0, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                                    Direct GPU access is restricted by your browser settings. Sentry is switching to
-                                    its <strong style={{ color: 'var(--amber)' }}>Lite Mode</strong> — the same private
-                                    AI, running on your CPU. Slightly slower, equally private.
-                                </p>
+                            <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '0 0 10px', textAlign: 'center' }}>
+                                No GPU detected. Running in CPU mode:
+                            </p>
+                            <div style={{ display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+                                <ModelCard
+                                    tier={MODEL_TIERS.WASM}
+                                    selected={selectedModel === MODEL_TIERS.WASM.id}
+                                    onClick={() => setSelectedModel(MODEL_TIERS.WASM.id)}
+                                />
                             </div>
 
-                            {/* Unlock Pro Performance expander */}
+                            {/* Optional: unlock GPU guide */}
                             <button
                                 onClick={() => setShowUnlock(v => !v)}
                                 style={{
@@ -409,7 +407,7 @@ export default function Diagnostic() {
                                     cursor: 'pointer', color: 'var(--text-secondary)', fontSize: 12,
                                 }}
                             >
-                                <span>⚡ Want faster responses? Unlock Pro Performance</span>
+                                <span>⚡ Want faster GPU mode? Unlock WebGPU</span>
                                 {showUnlock ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                             </button>
 
@@ -425,9 +423,11 @@ export default function Diagnostic() {
                             style={{ marginTop: 4 }}
                         >
                             <Zap size={16} />
-                            {gpuOk
-                                ? (selectedModel === MODEL_TIERS.HIGH.id ? 'Launch Sentry Turbo' : 'Launch Sentry Lite')
-                                : 'Launch Sentry Lite'}
+                            {selectedModel === MODEL_TIERS.HIGH.id
+                                ? 'Launch Sentry Turbo'
+                                : selectedModel === MODEL_TIERS.WASM.id
+                                    ? '🧠 Launch in CPU Mode'
+                                    : 'Launch Sentry Lite'}
                         </button>
                     )}
 
@@ -447,8 +447,70 @@ export default function Diagnostic() {
                 </>
             )}
 
-            {/* ── Loading Progress (reused from existing style) ── */}
+            {/* ── Loading Progress ── */}
             {isLoading && <LoadingProgress model={model} selectedModel={selectedModel} />}
+
+            {/* ── Ready State ── */}
+            {isReady && (
+                <div className="fade-in" style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    textAlign: 'center',
+                    padding: '32px 16px 16px',
+                    gap: 12,
+                }}>
+                    {/* Animated checkmark */}
+                    <div style={{
+                        width: 64, height: 64,
+                        borderRadius: '50%',
+                        background: 'rgba(0,255,136,0.1)',
+                        border: '2px solid var(--emerald)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        boxShadow: '0 0 24px rgba(0,255,136,0.25)',
+                        marginBottom: 4,
+                    }}>
+                        <CheckCircle size={36} style={{ color: 'var(--emerald)' }} />
+                    </div>
+
+                    <h3 style={{ color: 'var(--emerald)', margin: 0, fontSize: 20 }}>
+                        Sentry AI is Ready
+                    </h3>
+
+                    <p style={{ margin: 0, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
+                        {selectedModel === MODEL_TIERS.WASM.id
+                            ? 'Model loaded in CPU/WASM mode. All processing is 100% local.'
+                            : 'Model loaded into WebGPU memory. You\'re now air-gapped capable.'}
+                    </p>
+
+                    {/* Engine badge */}
+                    <div style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 6,
+                        fontSize: 11, color: 'var(--text-muted)',
+                    }}>
+                        Engine:{' '}
+                        <span style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 4,
+                            color: selectedModel === MODEL_TIERS.HIGH.id ? 'var(--cyan)' : 'var(--emerald)',
+                            fontWeight: 600,
+                        }}>
+                            {selectedModel === MODEL_TIERS.HIGH.id
+                                ? <>{MODEL_TIERS.HIGH.icon} {MODEL_TIERS.HIGH.shortLabel}<span style={{ color: 'var(--text-muted)', fontWeight: 400 }}> (3B)</span></>
+                                : selectedModel === MODEL_TIERS.WASM.id
+                                    ? <>{MODEL_TIERS.WASM.icon} {MODEL_TIERS.WASM.shortLabel}<span style={{ color: 'var(--text-muted)', fontWeight: 400 }}> (0.5B)</span></>
+                                    : <>{MODEL_TIERS.LOW.icon} {MODEL_TIERS.LOW.shortLabel}<span style={{ color: 'var(--text-muted)', fontWeight: 400 }}> (1B)</span></>}
+                        </span>
+                    </div>
+
+                    <button
+                        className="btn btn-primary btn-lg"
+                        onClick={() => navigate('/chat')}
+                        style={{ marginTop: 8, minWidth: 200 }}
+                    >
+                        Start Chatting <ChevronRight size={16} />
+                    </button>
+                </div>
+            )}
 
             {/* ── Keyframe for pulse dot ── */}
             <style>{`

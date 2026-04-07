@@ -1225,3 +1225,53 @@
     margin-bottom: 12px;
   }
 }
+
+/* ================================================================
+   PATCH: pages.css additions
+   Add these styles to the bottom of your existing src/pages/pages.css
+   ================================================================ */
+
+/* ── Warning banners (Home.jsx hardware warnings) ─────────────── */
+.warning-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.warning-banner.warning-critical {
+  background: var(--red-dim);
+  color: var(--red);
+  border: 1px solid rgba(255, 71, 87, 0.25);
+}
+
+.warning-banner.warning-warning {
+  background: var(--amber-dim);
+  color: var(--amber);
+  border: 1px solid rgba(255, 179, 71, 0.25);
+}
+
+.warning-banner.warning-info {
+  background: var(--cyan-dim);
+  color: var(--cyan);
+  border: 1px solid rgba(0, 212, 255, 0.2);
+}
+
+/* ── WASM mode notice ──────────────────────────────────────────── */
+.wasm-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--amber-dim);
+  border: 1px solid rgba(255, 179, 71, 0.3);
+  border-radius: var(--radius-md);
+}
+
+/* ── text-red utility (missing from index.css) ─────────────────── */
+.text-red {
+  color: var(--red);
+}

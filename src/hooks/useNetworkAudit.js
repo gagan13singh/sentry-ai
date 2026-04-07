@@ -1,9 +1,9 @@
 // ================================================================
 // useNetworkAudit.js
-// FIXED: HuggingFace/MLC calls now correctly classified as EXTERNAL
-//        (they are external — we track them honestly, just label them)
-// FIXED: "suspicious" = genuinely unexpected calls, not model CDNs
-// NEW:   requestIntentMap — categorizes every request by intent
+// FIXED: Font CDN (googleapis, gstatic) and pdfjs CDN (jsdelivr)
+//        no longer marked as "suspicious" — they're known asset CDNs
+// FIXED: HuggingFace/MLC calls correctly classified as EXTERNAL/expected
+// FIXED: "suspicious" = genuinely unexpected calls only
 // ================================================================
 
 import { useState, useEffect, useRef, useCallback } from 'react';
@@ -12,15 +12,17 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 const KNOWN_MODEL_DOMAINS = [
   'huggingface.co',
   'cdn-lfs.huggingface.co',
-  'huggingface.co',
   'raw.githubusercontent.com',
-  'cdn.jsdelivr.net',
   'github.com',
 ];
 
+// FIXED: Added jsdelivr (used by pdfjs-dist worker) and fonts CDN
 const KNOWN_ASSET_DOMAINS = [
   'fonts.googleapis.com',
   'fonts.gstatic.com',
+  'cdn.jsdelivr.net',   // pdfjs worker + other assets
+  'npmjs.com',
+  'unpkg.com',
 ];
 
 // Domains that are NEVER acceptable (telemetry, tracking, ads)
@@ -34,7 +36,7 @@ const BLOCKED_TELEMETRY_DOMAINS = [
   'mixpanel.com',
   'segment.com',
   'amplitude.com',
-  'sentry.io',          // ironic but real
+  'sentry.io',
   'datadog-browser-agent',
   'newrelic.com',
   'bugsnag.com',
@@ -47,8 +49,13 @@ function classifyRequest(url) {
   try {
     const u = new URL(url);
     const hostname = u.hostname.toLowerCase();
+    const origin = typeof location !== 'undefined' ? location.origin : '';
 
-    if (hostname === 'localhost' || hostname === '127.0.0.1' || u.origin === self?.location?.origin) {
+    if (
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      (origin && u.origin === origin)
+    ) {
       return { category: 'local', risk: 'none', label: 'Local Asset' };
     }
 
@@ -56,8 +63,9 @@ function classifyRequest(url) {
       return { category: 'telemetry', risk: 'critical', label: '🚨 Telemetry/Tracker' };
     }
 
+    // FIXED: Font CDN and pdfjs CDN are known assets — not suspicious
     if (KNOWN_ASSET_DOMAINS.some(d => hostname.includes(d))) {
-      return { category: 'asset', risk: 'low', label: 'Font Asset' };
+      return { category: 'asset', risk: 'low', label: 'Known CDN Asset' };
     }
 
     if (KNOWN_MODEL_DOMAINS.some(d => hostname.includes(d))) {
@@ -107,7 +115,7 @@ export function useNetworkAudit() {
         setSessionStats(prev => ({
           totalBytes: prev.totalBytes + newRequests.reduce((s, r) => s + r.size, 0),
           totalRequests: prev.totalRequests + newRequests.length,
-          externalBytes: prev.externalBytes + newRequests.filter(r => r.isExternal).reduce((s, r) => s + r.size, 0),
+          externalBytes: prev.externalBytes + newRequests.filter(r => r.isExternal && r.risk !== 'low').reduce((s, r) => s + r.size, 0),
         }));
       }
     });
@@ -140,7 +148,7 @@ export function useNetworkAudit() {
     return stopMonitoring;
   }, []);
 
-  // FIXED: genuinely unexpected calls (not model CDNs, not fonts)
+  // FIXED: genuinely unexpected calls only (not CDN assets, not model downloads)
   const suspiciousRequests = requests.filter(r =>
     r.risk === 'high' || r.risk === 'critical'
   );
