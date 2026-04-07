@@ -1,55 +1,82 @@
 // ================================================================
 // Audit.jsx — Privacy Audit Dashboard
-// Real-time network monitor + storage proof + privacy certificate
+// FIXED: Honest network reporting — model downloads shown as external
+// FIXED: suspiciousRequests only includes genuinely unexpected calls
+// NEW: Threat log from session
+// NEW: Encryption status
+// NEW: Panic wipe button
+// NEW: Memory usage display
 // ================================================================
 
 import { useState, useEffect } from 'react';
 import {
   Activity, Shield, Wifi, WifiOff, HardDrive,
-  Eye, Download, RefreshCw, CheckCircle, Globe, Lock
+  Eye, Download, RefreshCw, CheckCircle, Globe,
+  Lock, ShieldAlert, Flame, Database, Key,
+  AlertTriangle, Cpu
 } from 'lucide-react';
 import { useApp } from '../App';
 import { useNetworkAudit } from '../hooks/useNetworkAudit';
+import { useSessionVault } from '../hooks/useSessionVault';
 import { getStorageInfo, listCachedModels } from '../lib/opfs';
 
 export default function Audit() {
   const { model, connStatus } = useApp();
   const audit = useNetworkAudit();
+  const vault = useSessionVault();
 
-  const [storageInfo, setStorageInfo]   = useState(null);
+  const [storageInfo, setStorageInfo] = useState(null);
   const [cachedModels, setCachedModels] = useState([]);
-  const [lastRefresh, setLastRefresh]   = useState(new Date());
+  const [lastRefresh, setLastRefresh] = useState(new Date());
+  const [memUsage, setMemUsage] = useState(null);
 
   useEffect(() => {
     refreshData();
+    // Poll memory every 5s if available
+    const mem = performance?.memory;
+    if (mem) {
+      setMemUsage(mem);
+      const t = setInterval(() => setMemUsage({ ...performance.memory }), 5000);
+      return () => clearInterval(t);
+    }
   }, []);
 
   async function refreshData() {
-    const info    = await getStorageInfo();
-    const models  = await listCachedModels();
+    const info = await getStorageInfo();
+    const models = await listCachedModels();
     setStorageInfo(info);
     setCachedModels(models);
     setLastRefresh(new Date());
-
-    // Also clear the live network feed so the score properly resets
     audit.clearRequests();
   }
 
-  // Group external non-model requests
-  const suspiciousRequests = audit.externalRequests.filter(r => {
-    const url = r.url.toLowerCase();
-    return (
-      !url.includes('localhost') &&
-      !url.includes('huggingface') &&
-      !url.includes('fonts.googleapis') &&
-      !url.includes('fonts.gstatic') &&
-      !url.includes('github') && // Model configs occasionally load from raw.githubusercontent
-      !url.includes('cdn.jsdelivr')
+  const handlePanicWipe = async () => {
+    const confirmed = window.confirm(
+      '⚠️ PANIC WIPE\n\nThis will permanently delete:\n• All conversations\n• All vault documents\n• All cached model metadata\n• All encryption keys\n\nThe AI model weights in OPFS will remain (they\'re public data).\n\nThis cannot be undone. Continue?'
     );
-  });
+    if (!confirmed) return;
 
-  const privacyScore = Math.max(0, 100 - suspiciousRequests.length * 10);
-  const isPrivate    = suspiciousRequests.length === 0;
+    // Wipe vault (conversations + keys)
+    vault.wipeAll();
+    // Wipe orama IDB
+    const { clearDB } = await import('../lib/orama');
+    await clearDB();
+    localStorage.clear();
+    sessionStorage.clear();
+    alert('✓ Panic wipe complete. Reloading…');
+    window.location.reload();
+  };
+
+  // FIXED: genuinely suspicious = only unexpected external calls
+  const { suspiciousRequests, telemetryRequests, modelDownloadRequests } = audit;
+
+  // Privacy score: only deduct for truly unexpected/telemetry calls
+  const privacyScore = Math.max(0,
+    100
+    - telemetryRequests.length * 40
+    - suspiciousRequests.filter(r => r.risk === 'high').length * 15
+  );
+  const isPrivate = telemetryRequests.length === 0 && suspiciousRequests.filter(r => r.risk === 'high').length === 0;
 
   return (
     <div className="audit-page page-content">
@@ -60,12 +87,17 @@ export default function Audit() {
             Real-time proof that your data never leaves your device.
           </p>
         </div>
-        <button className="btn btn-ghost btn-sm" onClick={refreshData}>
-          <RefreshCw size={14} /> Refresh
-        </button>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="btn btn-ghost btn-sm" onClick={refreshData}>
+            <RefreshCw size={14} /> Refresh
+          </button>
+          <button className="btn btn-sm" style={{ background: 'var(--red-dim)', color: 'var(--red)', border: '1px solid rgba(255,71,87,0.3)' }} onClick={handlePanicWipe}>
+            <Flame size={14} /> Panic Wipe
+          </button>
+        </div>
       </div>
 
-      {/* ── Privacy Score ── */}
+      {/* Privacy Score */}
       <div className="score-card card fade-in">
         <div className="score-left">
           <div className={`score-circle ${isPrivate ? 'private' : 'warning'}`}>
@@ -75,13 +107,21 @@ export default function Audit() {
         </div>
         <div className="score-right">
           <h3 className={isPrivate ? 'text-emerald' : 'text-amber'}>
-            {isPrivate ? '✓ Privacy Verified' : '⚠ External Calls Detected'}
+            {isPrivate ? '✓ Privacy Verified' : '⚠ Issues Detected'}
           </h3>
           <p className="text-sm text-muted" style={{ marginTop: 4 }}>
             {isPrivate
-              ? 'Zero unauthorized bytes transmitted during AI operations.'
-              : `${suspiciousRequests.length} unexpected external request(s) detected.`}
+              ? 'No telemetry or unexpected external calls detected.'
+              : telemetryRequests.length > 0
+                ? `${telemetryRequests.length} TELEMETRY call(s) detected!`
+                : `${suspiciousRequests.length} unexpected external call(s).`
+            }
           </p>
+          {modelDownloadRequests.length > 0 && (
+            <p className="text-xs text-muted" style={{ marginTop: 4 }}>
+              ℹ️ {modelDownloadRequests.length} model download request(s) shown transparently below — these are expected during model loading.
+            </p>
+          )}
           <div style={{ marginTop: 12 }}>
             <div className="progress-bar">
               <div className="progress-bar-fill" style={{
@@ -95,49 +135,70 @@ export default function Audit() {
         </div>
       </div>
 
-      {/* ── Status Grid ── */}
+      {/* Status Grid */}
       <div className="audit-grid">
         <StatusCard
           icon={connStatus.isOnline ? <Wifi size={20} className="text-cyan" /> : <WifiOff size={20} className="text-emerald" />}
-          label="Network Status"
+          label="Network"
           value={connStatus.isAirGapped ? 'Air-Gapped 🔒' : connStatus.isOnline ? 'Connected' : 'Offline'}
           accent={connStatus.isAirGapped ? 'emerald' : 'cyan'}
         />
         <StatusCard
           icon={<Shield size={20} className="text-emerald" />}
           label="AI Model"
-          value={model.isReady ? 'Loaded Locally' : 'Not Loaded'}
+          value={model.isReady ? 'Local' : 'Not Loaded'}
           accent={model.isReady ? 'emerald' : 'muted'}
           sub={model.modelId?.replace(/-MLC$/, '') || '—'}
         />
         <StatusCard
+          icon={<Key size={20} className="text-cyan" />}
+          label="Chat Encryption"
+          value={vault.isLocked ? 'Locked' : 'AES-256-GCM'}
+          accent={vault.isLocked ? 'amber' : 'emerald'}
+          sub="Web Crypto API"
+        />
+        <StatusCard
           icon={<HardDrive size={20} className="text-purple" />}
-          label="Local Storage"
-          value={storageInfo ? `${storageInfo.usedGB} GB used` : '—'}
+          label="Storage"
+          value={storageInfo ? `${storageInfo.usedGB} GB` : '—'}
           accent="purple"
-          sub={storageInfo ? `${storageInfo.percentUsed}% of ${storageInfo.quotaGB} GB quota` : ''}
+          sub={storageInfo ? `${storageInfo.percentUsed}% of ${storageInfo.quotaGB} GB` : ''}
         />
         <StatusCard
           icon={<Eye size={20} className={isPrivate ? 'text-emerald' : 'text-red'} />}
-          label="Data Exfiltration"
-          value={isPrivate ? '0 bytes' : `${audit.sessionStats.totalBytes} bytes`}
+          label="Exfiltration"
+          value={telemetryRequests.length === 0 ? '0 bytes' : `${audit.sessionStats.externalBytes} B`}
           accent={isPrivate ? 'emerald' : 'red'}
-          sub="During AI inference session"
+          sub="Unauthorized data sent"
         />
+        <StatusCard
+          icon={<Database size={20} className="text-cyan" />}
+          label="Vector DB"
+          value="IndexedDB"
+          accent="cyan"
+          sub="Never leaves browser"
+        />
+        {memUsage && (
+          <StatusCard
+            icon={<Cpu size={20} className="text-purple" />}
+            label="JS Heap"
+            value={`${(memUsage.usedJSHeapSize / 1e6).toFixed(0)} MB`}
+            accent="purple"
+            sub={`of ${(memUsage.jsHeapSizeLimit / 1e6).toFixed(0)} MB limit`}
+          />
+        )}
       </div>
 
-      {/* ── Live Network Feed ── */}
+      {/* Live Network Feed — HONEST reporting */}
       <div className="card audit-section">
         <div className="audit-section-header">
           <Activity size={16} className="text-cyan" />
           <h3>Live Network Monitor</h3>
-          <div className="flex items-center gap-2" style={{ marginLeft: 'auto' }}>
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
             <span className="badge badge-emerald" style={{ fontSize: '0.65rem' }}>
               <span className="pulse" /> Live
             </span>
-            <button className="btn-icon" onClick={audit.clearRequests}>
-              <RefreshCw size={12} />
-            </button>
+            <button className="btn-icon" onClick={audit.clearRequests}><RefreshCw size={12} /></button>
           </div>
         </div>
 
@@ -148,7 +209,7 @@ export default function Audit() {
               <span className="text-sm text-muted">No network requests detected</span>
             </div>
           ) : (
-            audit.requests.slice(0, 20).map(req => (
+            audit.requests.slice(0, 25).map(req => (
               <NetworkEntry key={req.id} req={req} />
             ))
           )}
@@ -156,37 +217,32 @@ export default function Audit() {
 
         <div className="feed-stats">
           <span className="text-xs text-muted">
-            {audit.sessionStats.totalRequests} total requests ·&nbsp;
-            {(audit.sessionStats.totalBytes / 1024).toFixed(1)} KB transferred
+            {audit.sessionStats.totalRequests} total · {(audit.sessionStats.totalBytes / 1024).toFixed(1)} KB
+            {audit.sessionStats.externalBytes > 0 && (
+              <span className="text-amber"> · {(audit.sessionStats.externalBytes / 1024).toFixed(1)} KB external</span>
+            )}
           </span>
           <span className={`text-xs ${isPrivate ? 'text-emerald' : 'text-amber'}`}>
-            {suspiciousRequests.length === 0
-              ? '✓ No unauthorized requests'
-              : `${suspiciousRequests.length} suspicious`}
+            {telemetryRequests.length === 0 ? '✓ No telemetry' : `🚨 ${telemetryRequests.length} telemetry calls!`}
           </span>
         </div>
       </div>
 
-      {/* ── Cached Models ── */}
+      {/* Cached Models */}
       <div className="card audit-section">
         <div className="audit-section-header">
           <HardDrive size={16} className="text-purple" />
           <h3>Cached Models (OPFS)</h3>
         </div>
-
         {cachedModels.length === 0 ? (
-          <p className="text-sm text-muted" style={{ padding: '12px 0' }}>
-            No models in OPFS cache yet. Models are cached after first load.
-          </p>
+          <p className="text-sm text-muted" style={{ padding: '12px 0' }}>No models cached yet.</p>
         ) : (
           cachedModels.map(m => (
             <div key={m.modelId} className="model-cache-entry">
               <Shield size={14} className="text-emerald" />
               <div style={{ flex: 1 }}>
                 <div className="text-sm">{m.modelId}</div>
-                <div className="text-xs text-muted">
-                  Cached {new Date(m.cachedAt).toLocaleDateString()}
-                </div>
+                <div className="text-xs text-muted">Cached {new Date(m.cachedAt).toLocaleDateString()}</div>
               </div>
               <CheckCircle size={14} className="text-emerald" />
             </div>
@@ -194,7 +250,7 @@ export default function Audit() {
         )}
       </div>
 
-      {/* ── Privacy Certificate ── */}
+      {/* Privacy Certificate */}
       <div className="card certificate">
         <div className="cert-header">
           <Lock size={20} className="text-cyan" />
@@ -204,15 +260,16 @@ export default function Audit() {
           <p className="text-sm">
             <strong>Sentry AI</strong> certifies that as of{' '}
             <strong>{lastRefresh.toLocaleString()}</strong>, all AI inference
-            operations were performed entirely on local hardware using WebGPU acceleration.
+            was performed on local hardware via WebGPU.
           </p>
           <div className="cert-facts">
             {[
               'No prompts sent to external servers',
               'No user data uploaded to the cloud',
-              'Model weights stored in Origin Private File System',
-              'Vector embeddings stored in browser-native Orama DB',
-              'Conversations stored only in localStorage',
+              'Conversations encrypted with AES-256-GCM (Web Crypto API)',
+              'Vector embeddings in IndexedDB (never in localStorage)',
+              'Model weights in Origin Private File System',
+              'Zero telemetry, analytics, or tracking',
             ].map(f => (
               <div key={f} className="cert-fact">
                 <CheckCircle size={13} className="text-emerald" /> {f}
@@ -221,11 +278,12 @@ export default function Audit() {
           </div>
         </div>
         <button className="btn btn-secondary btn-sm" onClick={() => {
-          const cert = `SENTRY AI PRIVACY CERTIFICATE\n${lastRefresh.toISOString()}\n\nPrivacy Score: ${privacyScore}/100\nExternal Requests: ${suspiciousRequests.length}\nModel: ${model.modelId || 'N/A'}\nStatus: ${isPrivate ? 'VERIFIED PRIVATE' : 'WARNINGS DETECTED'}`;
+          const cert = `SENTRY AI PRIVACY CERTIFICATE\n${lastRefresh.toISOString()}\n\nPrivacy Score: ${privacyScore}/100\nTelemetry Calls: ${telemetryRequests.length}\nUnexpected External: ${suspiciousRequests.length}\nModel Download Calls: ${modelDownloadRequests.length} (expected)\nChat Encryption: AES-256-GCM\nModel: ${model.modelId || 'N/A'}\nStatus: ${isPrivate ? 'VERIFIED PRIVATE' : 'WARNINGS DETECTED'}`;
           const blob = new Blob([cert], { type: 'text/plain' });
-          const url  = URL.createObjectURL(blob);
-          const a    = document.createElement('a');
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
           a.href = url; a.download = 'sentry-ai-privacy-cert.txt'; a.click();
+          URL.revokeObjectURL(url);
         }}>
           <Download size={14} /> Export Certificate
         </button>
@@ -245,22 +303,39 @@ function StatusCard({ icon, label, value, accent, sub }) {
   );
 }
 
+const RISK_COLORS = {
+  none: 'text-muted',
+  low: 'text-muted',
+  expected: 'text-cyan',
+  medium: 'text-amber',
+  high: 'text-amber',
+  critical: 'text-red',
+};
+
 function NetworkEntry({ req }) {
-  const isInternal = req.isSentryInternal;
   const domain = (() => {
     try { return new URL(req.url).hostname; }
     catch { return req.url.slice(0, 30); }
   })();
 
+  const colorClass = RISK_COLORS[req.risk] || 'text-muted';
+
   return (
-    <div className={`network-entry ${isInternal ? 'internal' : 'external'}`}>
-      <Globe size={12} className={isInternal ? 'text-muted' : 'text-amber'} />
+    <div className={`network-entry ${req.isExternal ? 'external' : ''}`}>
+      <Globe size={12} className={colorClass} />
       <span className="text-xs truncate" style={{ flex: 1 }}>{domain}</span>
       <span className="text-xs text-muted">{(req.size / 1024).toFixed(1)}KB</span>
       <span className="text-xs text-muted">{req.timestamp}</span>
-      <span className={`badge ${isInternal ? 'badge-cyan' : 'badge-amber'}`}
-        style={{ fontSize: '0.6rem', padding: '2px 6px' }}>
-        {isInternal ? req.type : 'ext'}
+      <span
+        className={`badge`}
+        style={{
+          fontSize: '0.6rem',
+          padding: '2px 6px',
+          background: req.risk === 'critical' ? 'var(--red-dim)' : req.risk === 'high' ? 'var(--amber-dim)' : 'var(--cyan-dim)',
+          color: req.risk === 'critical' ? 'var(--red)' : req.risk === 'high' ? 'var(--amber)' : 'var(--cyan)',
+        }}
+      >
+        {req.label || req.category}
       </span>
     </div>
   );

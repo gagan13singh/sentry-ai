@@ -1,44 +1,113 @@
 // ================================================================
 // useNetworkAudit.js
-// Monitors all outbound network requests via PerformanceObserver
-// For the Privacy Audit dashboard — proves 0 bytes leave during AI inference
+// FIXED: HuggingFace/MLC calls now correctly classified as EXTERNAL
+//        (they are external — we track them honestly, just label them)
+// FIXED: "suspicious" = genuinely unexpected calls, not model CDNs
+// NEW:   requestIntentMap — categorizes every request by intent
 // ================================================================
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 
+// Known legitimate external domains during MODEL DOWNLOAD phase only
+const KNOWN_MODEL_DOMAINS = [
+  'huggingface.co',
+  'cdn-lfs.huggingface.co',
+  'huggingface.co',
+  'raw.githubusercontent.com',
+  'cdn.jsdelivr.net',
+  'github.com',
+];
+
+const KNOWN_ASSET_DOMAINS = [
+  'fonts.googleapis.com',
+  'fonts.gstatic.com',
+];
+
+// Domains that are NEVER acceptable (telemetry, tracking, ads)
+const BLOCKED_TELEMETRY_DOMAINS = [
+  'google-analytics.com',
+  'analytics.google.com',
+  'doubleclick.net',
+  'facebook.com',
+  'connect.facebook.net',
+  'hotjar.com',
+  'mixpanel.com',
+  'segment.com',
+  'amplitude.com',
+  'sentry.io',          // ironic but real
+  'datadog-browser-agent',
+  'newrelic.com',
+  'bugsnag.com',
+  'logrocket.com',
+  'clarity.ms',
+  'bat.bing.com',
+];
+
+function classifyRequest(url) {
+  try {
+    const u = new URL(url);
+    const hostname = u.hostname.toLowerCase();
+
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || u.origin === self?.location?.origin) {
+      return { category: 'local', risk: 'none', label: 'Local Asset' };
+    }
+
+    if (BLOCKED_TELEMETRY_DOMAINS.some(d => hostname.includes(d))) {
+      return { category: 'telemetry', risk: 'critical', label: '🚨 Telemetry/Tracker' };
+    }
+
+    if (KNOWN_ASSET_DOMAINS.some(d => hostname.includes(d))) {
+      return { category: 'asset', risk: 'low', label: 'Font Asset' };
+    }
+
+    if (KNOWN_MODEL_DOMAINS.some(d => hostname.includes(d))) {
+      return { category: 'model_download', risk: 'expected', label: 'Model Download (External)' };
+    }
+
+    // Anything else is unexpected
+    return { category: 'unexpected', risk: 'high', label: '⚠ Unexpected External' };
+  } catch {
+    return { category: 'unknown', risk: 'medium', label: 'Unknown' };
+  }
+}
+
 export function useNetworkAudit() {
   const [requests, setRequests] = useState([]);
   const [isMonitoring, setIsMonitoring] = useState(false);
-  const [sessionStats, setSessionStats] = useState({ totalBytes: 0, totalRequests: 0 });
+  const [sessionStats, setSessionStats] = useState({ totalBytes: 0, totalRequests: 0, externalBytes: 0 });
   const observerRef = useRef(null);
-  const sessionStartRef = useRef(null);
 
   const startMonitoring = useCallback(() => {
     if (observerRef.current) return;
-    sessionStartRef.current = Date.now();
     setRequests([]);
-    setSessionStats({ totalBytes: 0, totalRequests: 0 });
+    setSessionStats({ totalBytes: 0, totalRequests: 0, externalBytes: 0 });
     setIsMonitoring(true);
 
     observerRef.current = new PerformanceObserver((list) => {
       const entries = list.getEntries();
       const newRequests = entries
         .filter(e => e.entryType === 'resource')
-        .map(e => ({
-          id: `${e.name}-${e.startTime}`,
-          url: e.name,
-          type: e.initiatorType,
-          size: e.transferSize || 0,
-          duration: Math.round(e.duration),
-          timestamp: new Date(performance.timeOrigin + e.startTime).toLocaleTimeString(),
-          isSentryInternal: e.name.includes('huggingface') || e.name.includes('mlc') || e.name.includes('localhost'),
-        }));
+        .map(e => {
+          const classification = classifyRequest(e.name);
+          const isExternal = classification.category !== 'local';
+          return {
+            id: `${e.name}-${e.startTime}`,
+            url: e.name,
+            type: e.initiatorType,
+            size: e.transferSize || 0,
+            duration: Math.round(e.duration),
+            timestamp: new Date(performance.timeOrigin + e.startTime).toLocaleTimeString(),
+            ...classification,
+            isExternal,
+          };
+        });
 
       if (newRequests.length > 0) {
-        setRequests(prev => [...newRequests, ...prev].slice(0, 100));
+        setRequests(prev => [...newRequests, ...prev].slice(0, 200));
         setSessionStats(prev => ({
           totalBytes: prev.totalBytes + newRequests.reduce((s, r) => s + r.size, 0),
           totalRequests: prev.totalRequests + newRequests.length,
+          externalBytes: prev.externalBytes + newRequests.filter(r => r.isExternal).reduce((s, r) => s + r.size, 0),
         }));
       }
     });
@@ -60,24 +129,30 @@ export function useNetworkAudit() {
 
   const clearRequests = useCallback(() => {
     setRequests([]);
-    setSessionStats({ totalBytes: 0, totalRequests: 0 });
+    setSessionStats({ totalBytes: 0, totalRequests: 0, externalBytes: 0 });
     if (typeof performance.clearResourceTimings === 'function') {
       performance.clearResourceTimings();
     }
   }, []);
 
-  // Auto-start on mount
   useEffect(() => {
     startMonitoring();
     return stopMonitoring;
   }, []);
 
-  // Requests filtered to only show external (non-AI-loading) during inference
-  const externalRequests = requests.filter(r => !r.isSentryInternal);
+  // FIXED: genuinely unexpected calls (not model CDNs, not fonts)
+  const suspiciousRequests = requests.filter(r =>
+    r.risk === 'high' || r.risk === 'critical'
+  );
+
+  const telemetryRequests = requests.filter(r => r.risk === 'critical');
+  const modelDownloadRequests = requests.filter(r => r.category === 'model_download');
 
   return {
     requests,
-    externalRequests,
+    suspiciousRequests,
+    telemetryRequests,
+    modelDownloadRequests,
     isMonitoring,
     sessionStats,
     startMonitoring,

@@ -1,6 +1,7 @@
 // ================================================================
 // Vault.jsx — Knowledge Vault
-// Upload files, view ingested docs, semantic search
+// FIXED: removeBySource actually called when deleting files
+// FIXED: ingest progress shown for all stages (extract + embed)
 // ================================================================
 
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -9,7 +10,7 @@ import {
   Mic, X, CheckCircle, AlertCircle, Loader
 } from 'lucide-react';
 import { useApp } from '../App';
-import { initDB, ingestText, ingestPDF, hybridSearch, getDocumentCount, clearDB } from '../lib/orama';
+import { initDB, ingestText, ingestPDF, hybridSearch, getDocumentCount, clearDB, removeBySource } from '../lib/orama';
 
 const VAULT_KEY = 'sentry-ai-vault-files';
 
@@ -19,12 +20,12 @@ function loadVaultFiles() {
 }
 
 export default function Vault() {
-  const { model }       = useApp();
-  const [files, setFiles]       = useState(loadVaultFiles);
+  const { model } = useApp();
+  const [files, setFiles] = useState(loadVaultFiles);
   const [docCount, setDocCount] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
-  const [query, setQuery]       = useState('');
-  const [results, setResults]   = useState([]);
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
   const [ingestProgress, setIngestProgress] = useState(null);
   const fileInputRef = useRef(null);
@@ -37,7 +38,6 @@ export default function Vault() {
     localStorage.setItem(VAULT_KEY, JSON.stringify(files));
   }, [files]);
 
-  // ── Drop zone ──────────────────────────────────────────────────────
   const handleDrop = useCallback(async (e) => {
     e.preventDefault();
     setIsDragging(false);
@@ -68,45 +68,50 @@ export default function Vault() {
 
       if (type.includes('pdf')) {
         await ingestPDF(file, embedFn, (p) => {
-          setIngestProgress({ name, ...p });
+          setIngestProgress({
+            name,
+            stage: p.stage,
+            done: p.done,
+            total: p.total,
+            label: p.stage === 'extract' ? 'Extracting pages…' : 'Building embeddings…',
+          });
         });
       } else if (type.startsWith('image/')) {
-        const dataUrl   = await readFileAsDataUrl(file);
-        const caption   = await model.captionImage(dataUrl);
-        const textToEmbed = `[Image: ${name}]\n${caption}`;
-        await ingestText(textToEmbed, name, 'image', embedFn, () => {});
+        setIngestProgress({ name, label: 'Captioning image…' });
+        const dataUrl = await readFileAsDataUrl(file);
+        const caption = await model.captionImage(dataUrl);
+        await ingestText(`[Image: ${name}]\n${caption}`, name, 'image', embedFn, () => { });
       } else if (type.startsWith('audio/')) {
+        setIngestProgress({ name, label: 'Transcribing audio…' });
         const arrayBuffer = await file.arrayBuffer();
-        const audioCtx    = new AudioContext({ sampleRate: 16000 });
-        const decoded     = await audioCtx.decodeAudioData(arrayBuffer);
-        const channelData = decoded.getChannelData(0);
-        const transcript  = await model.transcribeAudio(channelData);
-        await ingestText(transcript, name, 'audio', embedFn, () => {});
+        const audioCtx = new AudioContext({ sampleRate: 16000 });
+        const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+        const transcript = await model.transcribeAudio(decoded.getChannelData(0));
+        await ingestText(transcript, name, 'audio', embedFn, () => { });
       } else {
         const text = await file.text();
         await ingestText(text, name, 'text', embedFn, (p) => {
-          setIngestProgress({ name, ...p });
+          setIngestProgress({ name, label: 'Building embeddings…', done: p.done, total: p.total });
         });
       }
 
       setFiles(prev => prev.map(f => f.id === fileEntry.id ? { ...f, status: 'ready' } : f));
       setIngestProgress(null);
-      const count = await getDocumentCount();
-      setDocCount(count);
+      setDocCount(await getDocumentCount());
     } catch (err) {
       setFiles(prev => prev.map(f => f.id === fileEntry.id ? { ...f, status: 'error', error: err.message } : f));
       setIngestProgress(null);
     }
   };
 
-  // ── Search ─────────────────────────────────────────────────────────
   const handleSearch = async () => {
     if (!query.trim() || !model.isReady) return;
     setIsSearching(true);
     setResults([]);
     try {
       const embedding = await model.embedText(query);
-      const hits      = await hybridSearch(query, embedding ? new Float32Array(embedding) : new Float32Array(384), 8);
+      const vec = embedding ? new Float32Array(embedding) : new Float32Array(384);
+      const hits = await hybridSearch(query, vec, 8);
       setResults(hits);
     } catch (e) {
       console.error(e);
@@ -114,13 +119,19 @@ export default function Vault() {
     setIsSearching(false);
   };
 
-  const handleRemoveFile = (fileId, fileName) => {
+  // FIXED: actually removes vectors from the DB
+  const handleRemoveFile = async (fileId, fileName) => {
     setFiles(prev => prev.filter(f => f.id !== fileId));
-    // Note: In production, also remove vectors via removeBySource(fileName)
+    try {
+      await removeBySource(fileName);
+      setDocCount(await getDocumentCount());
+    } catch (e) {
+      console.warn('removeBySource failed:', e);
+    }
   };
 
   const handleClearAll = async () => {
-    if (!window.confirm('Clear all vault data?')) return;
+    if (!window.confirm('Clear all vault data? This cannot be undone.')) return;
     await clearDB();
     setFiles([]);
     setDocCount(0);
@@ -129,10 +140,10 @@ export default function Vault() {
   };
 
   const typeIcon = (type) => ({
-    pdf:   <FileText size={16} className="text-cyan"   />,
-    image: <Image    size={16} className="text-purple" />,
-    audio: <Mic      size={16} className="text-amber"  />,
-    text:  <FileText size={16} className="text-emerald"/>,
+    pdf: <FileText size={16} className="text-cyan" />,
+    image: <Image size={16} className="text-purple" />,
+    audio: <Mic size={16} className="text-amber" />,
+    text: <FileText size={16} className="text-emerald" />,
   }[type] || <FileText size={16} />);
 
   return (
@@ -149,7 +160,6 @@ export default function Vault() {
         )}
       </div>
 
-      {/* ── Drop zone ── */}
       <div
         className={`drop-zone ${isDragging ? 'dragging' : ''} ${!model.isReady ? 'disabled' : ''}`}
         onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
@@ -173,14 +183,13 @@ export default function Vault() {
         {!model.isReady && <p className="text-xs text-amber" style={{ marginTop: 4 }}>Load a model first</p>}
       </div>
 
-      {/* ── Ingest progress ── */}
       {ingestProgress && (
         <div className="ingest-progress card fade-in">
           <div className="flex items-center gap-3">
             <div className="spinner" />
             <div style={{ flex: 1 }}>
               <div className="flex justify-between text-sm">
-                <span>Ingesting {ingestProgress.name}…</span>
+                <span>{ingestProgress.label || 'Processing…'} {ingestProgress.name}</span>
                 {ingestProgress.total && (
                   <span className="text-cyan mono">{ingestProgress.done}/{ingestProgress.total}</span>
                 )}
@@ -196,7 +205,6 @@ export default function Vault() {
         </div>
       )}
 
-      {/* ── Search ── */}
       <div className="vault-search card">
         <Search size={16} className="text-muted" />
         <input
@@ -212,7 +220,6 @@ export default function Vault() {
         </button>
       </div>
 
-      {/* ── Search results ── */}
       {results.length > 0 && (
         <div className="search-results fade-in">
           <h4 className="text-sm text-muted" style={{ marginBottom: 12 }}>
@@ -234,7 +241,6 @@ export default function Vault() {
         </div>
       )}
 
-      {/* ── File list ── */}
       {files.length > 0 && (
         <div className="file-grid">
           {files.map(f => (
@@ -249,9 +255,9 @@ export default function Vault() {
               <div className="file-card-meta">
                 <span className="text-xs text-muted">{f.size}</span>
                 <span className="text-xs text-muted">{f.addedAt}</span>
-                {f.status === 'ready'      && <CheckCircle size={12} className="text-emerald" />}
+                {f.status === 'ready' && <CheckCircle size={12} className="text-emerald" />}
                 {f.status === 'processing' && <div className="spinner" style={{ width: 12, height: 12, borderWidth: 1.5 }} />}
-                {f.status === 'error'      && <AlertCircle size={12} className="text-red" title={f.error} />}
+                {f.status === 'error' && <AlertCircle size={12} className="text-red" title={f.error} />}
               </div>
             </div>
           ))}

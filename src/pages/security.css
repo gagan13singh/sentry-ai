@@ -1,0 +1,163 @@
+/* ================================================================
+   Security UI additions — append to pages.css
+   ================================================================ */
+
+/* ── Threat banner ──────────────────────────────────────────────── */
+.threat-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    font-size: 0.85rem;
+    font-weight: 500;
+    border-bottom: 1px solid;
+    animation: slideDown 0.2s ease;
+}
+
+@keyframes slideDown {
+    from {
+        transform: translateY(-100%);
+        opacity: 0;
+    }
+
+    to {
+        transform: translateY(0);
+        opacity: 1;
+    }
+}
+
+.threat-banner.threat-warning {
+    background: var(--amber-dim);
+    color: var(--amber);
+    border-color: rgba(255, 179, 71, 0.3);
+}
+
+.threat-banner.threat-critical {
+    background: var(--red-dim);
+    color: var(--red);
+    border-color: rgba(255, 71, 87, 0.4);
+    animation: flash-red 0.4s ease;
+}
+
+@keyframes flash-red {
+
+    0%,
+    100% {
+        background: var(--red-dim);
+    }
+
+    50% {
+        background: rgba(255, 71, 87, 0.25);
+    }
+}
+
+/* ── PII warning ────────────────────────────────────────────────── */
+.pii-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    background: var(--amber-dim);
+    border-bottom: 1px solid rgba(255, 179, 71, 0.2);
+    font-size: 0.78rem;
+    color: var(--amber);
+    animation: fadeIn 0.3s ease;
+}
+
+/* ── Input security icon ─────────────────────────────────────────── */
+.input-security-icon {
+    display: flex;
+    align-items: center;
+    padding: 4px;
+    opacity: 0.7;
+    transition: opacity var(--transition);
+}
+
+.input-security-icon:hover {
+    opacity: 1;
+}
+
+/* ── Panic wipe button pulse ─────────────────────────────────────── */
+.panic-btn {
+    position: relative;
+    overflow: visible;
+}
+
+.panic-btn::after {
+    content: '';
+    position: absolute;
+    inset: -3px;
+    border-radius: inherit;
+    border: 1px solid var(--red);
+    opacity: 0;
+    animation: panic-ring 3s ease-in-out infinite;
+}
+
+@keyframes panic-ring {
+
+    0%,
+    80%,
+    100% {
+        opacity: 0;
+        transform: scale(1);
+    }
+
+    40% {
+        opacity: 0.4;
+        transform: scale(1.05);
+    }
+}
+
+/* ── Threat log entry in sidebar ─────────────────────────────────── */
+.threat-log-indicator {
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    margin-top: auto;
+}
+
+/* ── Network entry risk colors ───────────────────────────────────── */
+.network-entry.risk-critical {
+    background: rgba(255, 71, 87, 0.08);
+    border-left: 2px solid var(--red);
+}
+
+.network-entry.risk-high {
+    background: rgba(255, 179, 71, 0.06);
+    border-left: 2px solid var(--amber);
+}
+
+.network-entry.risk-expected {
+    background: rgba(0, 212, 255, 0.04);
+}
+
+/* ── Score circle animation ──────────────────────────────────────── */
+.score-circle.private {
+    animation: score-pulse 3s ease-in-out infinite;
+}
+
+@keyframes score-pulse {
+
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 rgba(0, 255, 136, 0.2);
+    }
+
+    50% {
+        box-shadow: 0 0 0 8px rgba(0, 255, 136, 0);
+    }
+}
+
+/* ── Encryption badge ────────────────────────────────────────────── */
+.enc-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border-radius: 100px;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    background: var(--emerald-dim);
+    color: var(--emerald);
+    border: 1px solid rgba(0, 255, 136, 0.2);
+}
