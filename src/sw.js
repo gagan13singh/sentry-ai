@@ -12,21 +12,7 @@ import { ExpirationPlugin } from 'workbox-expiration';
 
 precacheAndRoute(self.__WB_MANIFEST);
 
-// Cache fonts
-registerRoute(
-  ({ url }) => url.origin === 'https://fonts.googleapis.com',
-  new CacheFirst({
-    cacheName: 'google-fonts-cache',
-    plugins: [new ExpirationPlugin({ maxEntries: 10, maxAgeSeconds: 60 * 60 * 24 * 365 })],
-  })
-);
-registerRoute(
-  ({ url }) => url.origin === 'https://fonts.gstatic.com',
-  new CacheFirst({
-    cacheName: 'gstatic-fonts-cache',
-    plugins: [new ExpirationPlugin({ maxEntries: 10, maxAgeSeconds: 60 * 60 * 24 * 365 })],
-  })
-);
+// Fonts are now self-hosted, no need to cache external font requests.
 
 // ── Security Config ───────────────────────────────────────────────
 let isStrictPrivateMode = false;
