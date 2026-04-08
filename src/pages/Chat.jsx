@@ -279,7 +279,7 @@ export default function Chat() {
     const ragText = await searchRAG(userText);
     const hasRagContext = ragText.length > 0;
 
-    const systemPrompt = `You are Sentry AI, a private local AI assistant. Be helpful, accurate, and concise.${hasRagContext ? `\n\nContext from user documents:\n${ragText}` : ''}`;
+    const systemPrompt = `You are Sentry AI, a private local AI assistant. Be helpful, accurate, and concise.\n\nCRITICAL: You MUST format ALL mathematical expressions and equations using LaTeX. You MUST wrap inline math in $...$ (e.g. $x^2=4$) and block math in $$...$$ (e.g. $$E=mc^2$$). DO NOT output plain LaTeX without the $ or $$ wrappers.${hasRagContext ? `\n\nContext from user documents:\n${ragText}` : ''}`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
