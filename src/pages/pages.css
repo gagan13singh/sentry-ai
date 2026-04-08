@@ -1395,6 +1395,50 @@
   color: var(--text-muted);
 }
 
+/* ── "How it Works" Desktop Placement ── */
+.how-it-works-wrap {
+  position: absolute;
+  top: 20px;
+  right: 30px;
+  z-index: 100;
+}
+
+/* ── Mobile Layout Fixes ── */
+@media (max-width: 768px) {
+  .how-it-works-wrap {
+    top: 70px; /* Sit comfortably below the mobile App.jsx topbar and online badge */
+    right: 16px;
+  }
+
+  .how-it-works-wrap button {
+    padding: 6px 12px;
+    font-size: 0.8rem;
+  }
+  
+  .how-it-works-wrap button svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  .hardware-greeting {
+    font-size: 0.82rem;
+    padding: 6px 14px;
+    margin: 8px 16px 24px;
+    text-align: center;
+  }
+
+  .capability-block {
+    flex-direction: column;
+    text-align: center;
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .capability-block .cap-icon-wrap {
+    margin: 0 auto;
+  }
+}
+
 /* ── WASM mode notice ──────────────────────────────────────────── */
 .wasm-notice {
   display: flex;

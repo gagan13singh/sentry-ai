@@ -16,10 +16,7 @@ export default function Home() {
 
   return (
     <div className="home-page">
-      <div 
-        style={{ position: 'absolute', top: 20, right: 30, zIndex: 100 }} 
-        className="fade-in"
-      >
+      <div className="how-it-works-wrap fade-in">
         <button 
           className="btn btn-secondary" 
           onClick={() => setShowAbout(true)} 
