@@ -1,15 +1,13 @@
 // ================================================================
-// deviceProfile.js — Hardware-Aware Model Selection
-// ENHANCED: 5-tier model system covering all use cases
-// - Speed-optimized for instant responses
-// - Quality-focused for complex reasoning
-// - Android-compatible without WebGPU
-// - Balanced general-purpose options
-// - Privacy-first local inference
+// deviceProfile.js — ANDROID-OPTIMIZED Hardware Detection
+// FIXES:
+// - Detects MediaTek/Mali/Adreno GPUs correctly
+// - Better fallback adapter detection
+// - Android Chrome memory constraints
+// - Conservative RAM estimation for older devices
 // ================================================================
 
 export const MODEL_TIERS = {
-  // ── SPEED TIER: Fastest responses, great for quick queries ─────────
   SPEED: {
     id: 'Qwen2.5-0.5B-Instruct-q4f16_1-MLC',
     label: 'Qwen 2.5 · 0.5B',
@@ -23,8 +21,6 @@ export const MODEL_TIERS = {
     strengths: ['Speed', 'Low memory', 'Quick answers'],
     weaknesses: ['Less context', 'Simpler reasoning'],
   },
-
-  // ── BALANCED TIER: Best all-rounder for most tasks ─────────────────
   BALANCED: {
     id: 'Llama-3.2-1B-Instruct-q4f16_1-MLC',
     label: 'Llama 3.2 · 1B',
@@ -38,8 +34,6 @@ export const MODEL_TIERS = {
     strengths: ['Good reasoning', 'Battery friendly', 'Reliable'],
     weaknesses: ['Moderate complexity limit'],
   },
-
-  // ── QUALITY TIER: Best reasoning for complex problems ──────────────
   QUALITY: {
     id: 'Phi-3.5-mini-instruct-q4f16_1-MLC',
     label: 'Phi 3.5 Mini · 3.8B',
@@ -53,8 +47,6 @@ export const MODEL_TIERS = {
     strengths: ['Excellent reasoning', 'Great code understanding', 'Detailed answers'],
     weaknesses: ['Larger size', 'More battery usage'],
   },
-
-  // ── POWER TIER: Maximum capabilities for demanding work ────────────
   POWER: {
     id: 'Llama-3.2-3B-Instruct-q4f16_1-MLC',
     label: 'Llama 3.2 · 3B',
@@ -68,8 +60,6 @@ export const MODEL_TIERS = {
     strengths: ['Best performance', 'Complex reasoning', 'Large context'],
     weaknesses: ['Requires more RAM', 'Slower on older devices'],
   },
-
-  // ── UNIVERSAL TIER: Works on any device, even without WebGPU ──────
   UNIVERSAL: {
     id: 'onnx-community/Qwen2.5-0.5B-Instruct',
     label: 'Qwen 2.5 · 0.5B · CPU',
@@ -86,16 +76,11 @@ export const MODEL_TIERS = {
   },
 };
 
-/**
- * Confidence score calculation helper
- * Determines if response is from RAG context (high confidence) or generated (low confidence)
- */
 export function calculateConfidenceScore(hasRagContext, modelTier, messageLength) {
-  // High confidence: RAG context available
   if (hasRagContext) {
     return {
       level: 'high',
-      score: 90 + Math.min(10, Math.floor(messageLength / 100)), // 90-100%
+      score: 90 + Math.min(10, Math.floor(messageLength / 100)),
       source: 'context',
       display: '✅ High confidence',
       color: 'emerald',
@@ -103,7 +88,6 @@ export function calculateConfidenceScore(hasRagContext, modelTier, messageLength
     };
   }
 
-  // Medium-high confidence: Quality/Power models with good training
   if (modelTier === 'QUALITY' || modelTier === 'POWER') {
     return {
       level: 'medium-high',
@@ -115,7 +99,6 @@ export function calculateConfidenceScore(hasRagContext, modelTier, messageLength
     };
   }
 
-  // Low confidence: Smaller models or no context
   return {
     level: 'low',
     score: 50 + Math.min(20, Math.floor(messageLength / 30)),
@@ -126,28 +109,60 @@ export function calculateConfidenceScore(hasRagContext, modelTier, messageLength
   };
 }
 
-/**
- * Probes hardware capabilities and returns the best model config.
- * @returns {Promise<{tier, model, ram, gpuInfo, supportsWebGPU, isFallbackAdapter, hasSharedArrayBuffer, warnings, recommendations}>}
- */
+// OPTIMIZATION: Enhanced Android GPU detection
+async function detectAndroidGPU() {
+  const ua = navigator.userAgent.toLowerCase();
+  const isAndroid = /android/.test(ua);
+  if (!isAndroid) return null;
+
+  // Common Android GPU patterns
+  const gpuPatterns = {
+    adreno: /adreno (\d+)/i,
+    mali: /mali-([a-z0-9]+)/i,
+    mediatek: /mt(\d+)/i,
+    powervr: /powervr/i,
+  };
+
+  for (const [vendor, pattern] of Object.entries(gpuPatterns)) {
+    const match = ua.match(pattern);
+    if (match) {
+      return {
+        vendor,
+        model: match[1] || 'unknown',
+        isLowEnd: vendor === 'mali' && parseInt(match[1]) < 600,
+      };
+    }
+  }
+  return null;
+}
+
 export async function detectHardwareProfile() {
   const warnings = [];
   const recommendations = [];
 
-  // ── SharedArrayBuffer check (COOP/COEP headers required by WebLLM) ──
   const hasSharedArrayBuffer = typeof SharedArrayBuffer !== 'undefined';
   if (!hasSharedArrayBuffer) {
     warnings.push({
       type: 'missing_sab',
-      message: 'SharedArrayBuffer unavailable — COOP/COEP headers missing. WebLLM will fail silently. Deploy with Cross-Origin-Isolation headers.',
+      message: 'SharedArrayBuffer unavailable — COOP/COEP headers missing. WebLLM will fail silently.',
       severity: 'critical',
     });
   }
 
-  // ── RAM detection ────────────────────────────────────────────────
-  const ram = navigator.deviceMemory ?? 4;
+  // OPTIMIZATION: Better RAM detection for Android
+  let ram = navigator.deviceMemory ?? 4;
+  const androidGPU = await detectAndroidGPU();
 
-  // ── WebGPU detection ─────────────────────────────────────────────
+  // Conservative estimate for older Android devices
+  if (androidGPU && androidGPU.isLowEnd && ram < 3) {
+    ram = Math.max(2, ram); // Force minimum 2GB for compatibility
+    warnings.push({
+      type: 'low_memory_android',
+      message: 'Low-memory Android device detected. Using lightweight model.',
+      severity: 'warning',
+    });
+  }
+
   let gpuInfo = null;
   let supportsWebGPU = false;
   let isFallbackAdapter = false;
@@ -157,6 +172,7 @@ export async function detectHardwareProfile() {
       const adapter = await navigator.gpu.requestAdapter({
         powerPreference: 'high-performance',
       });
+      
       if (adapter) {
         supportsWebGPU = true;
 
@@ -168,14 +184,34 @@ export async function detectHardwareProfile() {
           description: info.description || 'WebGPU GPU',
         };
 
-        // Detect software/fallback adapters (common on budget Android)
+        // OPTIMIZATION: Enhanced fallback detection for Android
         isFallbackAdapter = !!(
           adapter.isFallbackAdapter ||
-          (info.vendor || '').toLowerCase().includes('google') && (info.architecture || '').toLowerCase().includes('swiftshader') ||
+          (info.vendor || '').toLowerCase().includes('google') ||
+          (info.vendor || '').toLowerCase().includes('swiftshader') ||
+          (info.architecture || '').toLowerCase().includes('swiftshader') ||
           (info.description || '').toLowerCase().includes('llvmpipe') ||
           (info.description || '').toLowerCase().includes('softpipe') ||
-          (info.description || '').toLowerCase().includes('swiftshader')
+          (info.description || '').toLowerCase().includes('swiftshader') ||
+          // Android-specific software renderer patterns
+          (info.description || '').toLowerCase().includes('angle') ||
+          (info.vendor || '').toLowerCase().includes('vivante')
         );
+
+        // OPTIMIZATION: Detect problematic Android GPU drivers
+        if (androidGPU && !isFallbackAdapter) {
+          const limits = await adapter.requestDevice().then(device => device.limits);
+          
+          // Check if GPU memory is too constrained
+          if (limits && limits.maxBufferSize < 256 * 1024 * 1024) {
+            isFallbackAdapter = true;
+            warnings.push({
+              type: 'constrained_gpu',
+              message: 'GPU memory constraints detected. Using CPU fallback for stability.',
+              severity: 'warning',
+            });
+          }
+        }
 
         if (isFallbackAdapter) {
           warnings.push({
@@ -187,26 +223,27 @@ export async function detectHardwareProfile() {
       }
     } catch (e) {
       supportsWebGPU = false;
+      console.warn('WebGPU detection failed:', e);
     }
   }
 
-  // ── Tier selection with recommendations ─────────────────────────────
   let tier, model;
   const availableModels = [];
 
-  if (!supportsWebGPU || isFallbackAdapter || !hasSharedArrayBuffer) {
-    // No WebGPU → Universal tier only
+  // OPTIMIZATION: Android-aware model selection
+  if (!supportsWebGPU || isFallbackAdapter || !hasSharedArrayBuffer || (androidGPU && androidGPU.isLowEnd)) {
     tier = 'UNIVERSAL';
     model = MODEL_TIERS.UNIVERSAL;
     availableModels.push(MODEL_TIERS.UNIVERSAL);
 
     recommendations.push({
       type: 'device_limitation',
-      message: 'Your device doesn\'t support WebGPU. Using CPU-compatible model.',
-      suggestion: 'For better performance, try Chrome or Edge on a device with GPU support.',
+      message: 'Your device doesn\'t support WebGPU or has constrained resources. Using CPU-compatible model.',
+      suggestion: androidGPU 
+        ? 'For better performance on Android, try Chrome Canary with WebGPU flags enabled.'
+        : 'For better performance, try Chrome or Edge on a device with GPU support.',
     });
   } else if (ram >= 8) {
-    // High-end device → All models available, recommend Power/Quality
     tier = 'POWER';
     model = MODEL_TIERS.POWER;
     availableModels.push(
@@ -222,7 +259,6 @@ export async function detectHardwareProfile() {
       suggestion: 'Try "High Quality" (Phi 3.5) for best reasoning, or "Maximum Power" for peak performance.',
     });
   } else if (ram >= 6) {
-    // Mid-range → Quality is max, recommend Quality/Balanced
     tier = 'QUALITY';
     model = MODEL_TIERS.QUALITY;
     availableModels.push(
@@ -237,7 +273,6 @@ export async function detectHardwareProfile() {
       suggestion: 'Try "High Quality" (Phi 3.5) for best results, or "Well-Rounded" for battery efficiency.',
     });
   } else if (ram >= 4) {
-    // Entry-level WebGPU → Balanced max, recommend Balanced/Speed
     tier = 'BALANCED';
     model = MODEL_TIERS.BALANCED;
     availableModels.push(
@@ -251,7 +286,6 @@ export async function detectHardwareProfile() {
       suggestion: 'Use "Well-Rounded" for everyday tasks, or "Lightning Fast" for quick answers.',
     });
   } else {
-    // Very low RAM → Speed only
     tier = 'SPEED';
     model = MODEL_TIERS.SPEED;
     availableModels.push(MODEL_TIERS.SPEED);
@@ -274,35 +308,26 @@ export async function detectHardwareProfile() {
     warnings,
     recommendations,
     availableModels,
+    androidGPU, // Include Android GPU info for debugging
   };
 }
 
-/**
- * Returns all available model options based on device capabilities.
- */
 export function getAvailableModels(profile) {
   if (!profile) return Object.values(MODEL_TIERS);
   return profile.availableModels || [profile.model];
 }
 
-/**
- * Returns model tier name from model ID
- */
 export function getModelTierFromId(modelId) {
   for (const [tierName, tierData] of Object.entries(MODEL_TIERS)) {
     if (tierData.id === modelId) {
       return tierName;
     }
   }
-  return 'BALANCED'; // Default fallback
+  return 'BALANCED';
 }
 
-// ── Session key & profile cache helpers ─────────────────────────────
-const PROFILE_CACHE_KEY = 'sentry_hw_profile_v3'; // Bumped version
+const PROFILE_CACHE_KEY = 'sentry_hw_profile_v4'; // Bumped for Android fixes
 
-/**
- * Generates a short random session key (stays only in RAM — never persisted).
- */
 export function generateSessionKey() {
   const bytes = crypto.getRandomValues(new Uint8Array(8));
   return (
@@ -313,16 +338,11 @@ export function generateSessionKey() {
   );
 }
 
-/**
- * Returns a cached hardware profile if it exists and was generated with the
- * same browser version (to trigger a re-scan on browser updates).
- */
 export function getCachedProfile() {
   try {
     const raw = sessionStorage.getItem(PROFILE_CACHE_KEY);
     if (!raw) return null;
     const cached = JSON.parse(raw);
-    // Invalidate if browser version has changed
     if (cached.userAgent !== navigator.userAgent) return null;
     return cached;
   } catch {
@@ -330,9 +350,6 @@ export function getCachedProfile() {
   }
 }
 
-/**
- * Persists a hardware profile to sessionStorage (cleared on tab close).
- */
 export function setCachedProfile(profile) {
   try {
     sessionStorage.setItem(
@@ -340,6 +357,6 @@ export function setCachedProfile(profile) {
       JSON.stringify({ ...profile, userAgent: navigator.userAgent })
     );
   } catch {
-    // sessionStorage may be unavailable in some contexts — silently ignore
+    // Ignore
   }
 }
