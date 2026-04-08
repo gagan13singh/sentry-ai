@@ -4,6 +4,7 @@
 // NEW: 5-tier model system with smart device-based recommendations
 // NEW: User-friendly adjectives (Lightning Fast, Well-Rounded, etc.)
 // NEW: Shows suitable models based on device capabilities
+// FIXED: Models now appear immediately after scan completion
 // ================================================================
 
 import { useEffect, useState, useRef } from 'react';
@@ -18,20 +19,20 @@ const SCAN_STEPS = [
     {
         id: 'isolation',
         icon: '🔎',
-        label: 'Checking Browser Isolation',
-        subtext: 'Verifying SharedArrayBuffer for your security',
+        label: 'Securing Sandbox',
+        subtext: 'Ensuring no other tabs can read your chat',
     },
     {
         id: 'vram',
         icon: '🧠',
-        label: 'Assessing Memory Capacity',
-        subtext: 'Allocating local memory for the AI engine',
+        label: 'Allocating RAM',
+        subtext: 'Carving out safe local memory for the AI',
     },
     {
         id: 'gpu',
         icon: '🛡️',
         label: 'Testing GPU Path',
-        subtext: 'Confirming your hardware can process data privately',
+        subtext: 'Bypassing the cloud for direct hardware access',
     },
     {
         id: 'key',
@@ -138,7 +139,7 @@ export default function Diagnostic() {
         setSessionKey(key);
         setStep(3, 'pass', key);
 
-        finaliseScan();
+        await finaliseScan();
     }
 
     async function loadFromCache(cached) {
@@ -168,13 +169,12 @@ export default function Diagnostic() {
             gpuInfo: cached.gpuInfo,
         };
 
-        await model.detectHardware();
-        const profile = model.hwProfile;
-        populateModelSelections(profile);
+        const currentProfile = await model.detectHardware();
+        populateModelSelections(currentProfile);
         setScanDone(true);
     }
 
-    function finaliseScan() {
+    async function finaliseScan() {
         setCurrentStep(4);
         setScanDone(true);
 
@@ -192,9 +192,9 @@ export default function Diagnostic() {
         }
 
         setCachedProfile(profile);
-        model.detectHardware().then(() => {
-            populateModelSelections(model.hwProfile);
-        });
+        // FIXED: Await hardware detection and immediately populate models using returned profile
+        const currentProfile = await model.detectHardware();
+        populateModelSelections(currentProfile);
     }
 
     function populateModelSelections(profile) {
@@ -451,18 +451,19 @@ function ModelCard({ tier, selected, recommended, onClick }) {
             {recommended && (
                 <div style={{
                     position: 'absolute',
-                    top: -6,
+                    top: -8,
                     right: 8,
                     fontSize: 9,
-                    fontWeight: 700,
-                    color: 'var(--cyan)',
-                    background: 'var(--bg)',
-                    padding: '2px 6px',
-                    borderRadius: 4,
-                    border: '1px solid var(--cyan)',
-                    letterSpacing: 0.5,
+                    fontWeight: 800,
+                    color: '#000',
+                    background: 'var(--cyan)',
+                    padding: '3px 8px',
+                    borderRadius: 12,
+                    boxShadow: '0 0 10px rgba(6,182,212,0.5)',
+                    letterSpacing: 0.8,
+                    textTransform: 'uppercase',
                 }}>
-                    RECOMMENDED
+                    Recommended
                 </div>
             )}
 

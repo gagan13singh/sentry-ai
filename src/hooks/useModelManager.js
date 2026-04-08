@@ -46,17 +46,23 @@ export function useModelManager() {
   }, []);
 
   const detectHardware = useCallback(async () => {
-    setStatus(MODEL_STATUS.CHECKING);
+    if (statusRef.current !== MODEL_STATUS.READY && statusRef.current !== MODEL_STATUS.LOADING) {
+      setStatus(MODEL_STATUS.CHECKING);
+    }
     try {
       const profile = await detectHardwareProfile();
       setHwProfile(profile);
       const info = await getStorageInfo();
       setStorageInfo(info);
-      setStatus(MODEL_STATUS.IDLE);
+      if (statusRef.current === MODEL_STATUS.CHECKING) {
+        setStatus(MODEL_STATUS.IDLE);
+      }
       return profile;
     } catch (e) {
       setError(e.message);
-      setStatus(MODEL_STATUS.ERROR);
+      if (statusRef.current === MODEL_STATUS.CHECKING) {
+        setStatus(MODEL_STATUS.ERROR);
+      }
       return null;
     }
   }, []);

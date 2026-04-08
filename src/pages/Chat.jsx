@@ -5,12 +5,13 @@
 // ENHANCED: Better model selection UI with adjectives
 // ================================================================
 
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Send, Image, Mic, MicOff, Plus, Trash2, ChevronRight,
   Sparkles, User, Copy, Check, StopCircle, FileText,
-  ShieldAlert, ShieldCheck, Download, AlertTriangle, Info
+  ShieldAlert, ShieldCheck, Download, AlertTriangle, Info,
+  Edit2, RefreshCw, PanelLeftClose, PanelLeft, X
 } from 'lucide-react';
 import { useApp } from '../App';
 import { MODEL_STATUS } from '../hooks/useModelManager';
@@ -20,6 +21,71 @@ import { useSessionVault } from '../hooks/useSessionVault';
 import { initDB, hybridSearch } from '../lib/orama';
 import { calculateConfidenceScore } from '../lib/deviceProfile';
 import ReactMarkdown from '../components/ReactMarkdown';
+
+// ── Memoized MessageRow to prevent lag during streaming ──────────────
+const MessageItem = memo(({ msg, isLastMsg, onCopy, copiedId, onEdit, onRetry }) => {
+  return (
+    <div className={`message-row ${msg.role}`}>
+      <div className="msg-avatar">
+        {msg.role === 'user' ? <User size={16} /> : <Sparkles size={18} fill="currentColor" />}
+      </div>
+      <div className="msg-bubble">
+        {msg.image && <img src={msg.image} alt="attached" className="msg-image" />}
+        {msg._hadImage && !msg.image && (
+          <div className="text-xs text-muted" style={{ marginBottom: 8, fontStyle: 'italic' }}>
+            [Image not persisted — reattach to use again]
+          </div>
+        )}
+        <div className="md-content">
+          <ReactMarkdown content={msg.content} isStreaming={!!msg.streaming} />
+          {msg.streaming && <span className="cursor-blink">▍</span>}
+        </div>
+
+        {msg.role === 'assistant' && !msg.streaming && msg.confidence && (
+          <div className="confidence-badge" style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
+            padding: '4px 8px',
+            marginTop: 8,
+            borderRadius: 4,
+            fontSize: 11,
+            fontWeight: 500,
+            backgroundColor: msg.confidence.level === 'high' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
+            color: msg.confidence.level === 'high' ? 'var(--emerald)' : 'var(--amber)',
+            border: `1px solid ${msg.confidence.level === 'high' ? 'var(--emerald)' : 'var(--amber)'}`,
+          }}>
+            <span>{msg.confidence.display}</span>
+            <div className="confidence-tooltip" title={msg.confidence.explanation}>
+              <Info size={12} style={{ opacity: 0.7 }} />
+            </div>
+          </div>
+        )}
+
+        <div className="msg-footer">
+          <span className="text-xs text-muted">{msg.timestamp}</span>
+          {!msg.streaming && (
+            <div className="msg-actions">
+              <button className="btn-icon" onClick={() => onCopy(msg.id, msg.content)} title="Copy">
+                {copiedId === msg.id ? <Check size={14} className="text-emerald" /> : <Copy size={14} />}
+              </button>
+              {msg.role === 'user' && (
+                <button className="btn-icon" onClick={() => onEdit(msg.id, msg.content)} title="Edit prompt">
+                  <Edit2 size={14} />
+                </button>
+              )}
+              {msg.role === 'assistant' && isLastMsg && (
+                <button className="btn-icon" onClick={() => onRetry(msg.id)} title="Regenerate response">
+                  <RefreshCw size={14} />
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+});
 
 function newConversation() {
   return { id: Date.now().toString(), title: 'New Chat', messages: [], createdAt: Date.now() };
@@ -59,6 +125,8 @@ export default function Chat() {
   const audioChunks = useRef([]);
   const abortRef = useRef(false);
   const fileInputRef = useRef(null);
+  
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
   // ── Security hooks ─────────────────────────────────────────────────
   const { scanInput, threatLog } = useThreatDetector((threat) => {
@@ -181,11 +249,11 @@ export default function Chat() {
     }
   };
 
-  // ── Main send handler ──────────────────────────────────────────────
-  const handleSend = async () => {
-    if ((!input.trim() && !attachedImage) || !model.isReady || isStreaming) return;
+  // ── Interaction runner ─────────────────────────────────────────────
+  const runInteraction = async (userText, attachedImg, currentMsgs) => {
+    setIsStreaming(true);
+    abortRef.current = false;
 
-    const userText = input.trim();
     const pii = checkPII(userText);
     if (pii) {
       setPiiWarning(`Detected possible ${pii.join(', ')} in your message. Data stays local.`);
@@ -195,52 +263,45 @@ export default function Chat() {
     await scanInput(userText);
 
     const userMsg = {
-      id: Date.now().toString(),
+      id: crypto.randomUUID(),
       role: 'user',
       content: userText,
-      image: attachedImage,
+      image: attachedImg,
       timestamp: new Date().toLocaleTimeString(),
     };
 
-    setConversations(prev => prev.map(c =>
-      c.id === activeId ? { ...c, messages: [...c.messages, userMsg] } : c
-    ));
+    const updatedMsgs = [...currentMsgs, userMsg];
 
-    setInput('');
-    setAttachedImage(null);
-    if (inputRef.current) {
-      inputRef.current.style.height = 'auto';
-    }
-    setIsStreaming(true);
-    abortRef.current = false;
+    setConversations(prev => prev.map(c =>
+      c.id === activeId ? { ...c, messages: updatedMsgs } : c
+    ));
 
     const ragText = await searchRAG(userText);
     const hasRagContext = ragText.length > 0;
 
-    const systemPrompt = `You are Sentry AI, a private local AI assistant. Be helpful, accurate, and concise.${hasRagContext ? `\n\nContext from user documents:\n${ragText}` : ''
-      }`;
+    const systemPrompt = `You are Sentry AI, a private local AI assistant. Be helpful, accurate, and concise.${hasRagContext ? `\n\nContext from user documents:\n${ragText}` : ''}`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
-      ...activeConv.messages.filter(m => !m.streaming).map(m => ({
+      ...currentMsgs.filter(m => !m.streaming).map(m => ({
         role: m.role,
         content: m.content,
       })),
       { role: 'user', content: userText },
     ];
 
-    const assistantId = (Date.now() + 1).toString();
-    let assistantMsg = {
+    const assistantId = crypto.randomUUID();
+    const assistantMsg = {
       id: assistantId,
       role: 'assistant',
       content: '',
       streaming: true,
       timestamp: new Date().toLocaleTimeString(),
-      hasRagContext, // Track if response used RAG context
+      hasRagContext,
     };
 
     setConversations(prev => prev.map(c =>
-      c.id === activeId ? { ...c, messages: [...c.messages, assistantMsg] } : c
+      c.id === activeId ? { ...c, messages: [...updatedMsgs, assistantMsg] } : c
     ));
 
     try {
@@ -256,7 +317,8 @@ export default function Chat() {
         ));
       });
 
-      // Calculate confidence score after response completes
+      if (abortRef.current) return;
+
       if (result?.content) {
         const confidence = calculateConfidenceScore(
           hasRagContext,
@@ -270,20 +332,21 @@ export default function Chat() {
             messages: c.messages.map(m =>
               m.id === assistantId ? {
                 ...m,
+                content: result.content,
                 streaming: false,
-                confidence, // Add confidence score to message
+                confidence,
               } : m
             ),
           } : c
         ));
 
-        // Update conversation title if first exchange
-        if (activeConv.messages.length === 0) {
-          const title = userText.slice(0, 40) + (userText.length > 40 ? '…' : '');
-          setConversations(prev => prev.map(c =>
-            c.id === activeId ? { ...c, title } : c
-          ));
-        }
+        setConversations(prev => prev.map(c => {
+          if (c.id === activeId && currentMsgs.length === 0) {
+            const title = userText.slice(0, 40) + (userText.length > 40 ? '…' : '');
+            return { ...c, title };
+          }
+          return c;
+        }));
       }
     } catch (err) {
       console.error('Chat error:', err);
@@ -304,6 +367,65 @@ export default function Chat() {
     setIsStreaming(false);
     setRagContext([]);
   };
+
+  // ── Main send handler ──────────────────────────────────────────────
+  const handleSend = async () => {
+    if ((!input.trim() && !attachedImage) || !model.isReady || isStreaming) return;
+
+    const userText = input.trim();
+    const currentImg = attachedImage;
+
+    setInput('');
+    setAttachedImage(null);
+    if (inputRef.current) {
+      inputRef.current.style.height = 'auto';
+    }
+
+    await runInteraction(userText, currentImg, activeConv.messages);
+  };
+
+  // ── Edit message ───────────────────────────────────────────────────
+  const handleEditMessage = useCallback((msgId, content) => {
+    if (isStreaming) return;
+    setConversations(prev => prev.map(c => {
+      if (c.id !== activeId) return c;
+      const index = c.messages.findIndex(m => m.id === msgId);
+      if (index === -1) return c;
+      return { ...c, messages: c.messages.slice(0, index) };
+    }));
+    setInput(content);
+    if (inputRef.current) inputRef.current.focus();
+  }, [activeId, isStreaming]);
+
+  // ── Retry message ───────────────────────────────────────────────────
+  const handleRetryMessage = useCallback(async (msgId) => {
+    if (isStreaming || !model.isReady) return;
+    
+    let userText = '';
+    let attachedImg = null;
+    let prevMsgs = [];
+
+    setConversations(prev => {
+      const c = prev.find(conv => conv.id === activeId);
+      if (c) {
+        const index = c.messages.findIndex(m => m.id === msgId);
+        if (index > 0) {
+           const userMsg = c.messages[index - 1]; // user message
+           userText = userMsg.content;
+           attachedImg = userMsg.image;
+           prevMsgs = c.messages.slice(0, index - 1);
+           return prev.map(conv => conv.id === activeId ? { ...conv, messages: prevMsgs } : conv);
+        }
+      }
+      return prev;
+    });
+
+    if (userText) {
+      setTimeout(() => {
+        runInteraction(userText, attachedImg, prevMsgs);
+      }, 0);
+    }
+  }, [activeId, isStreaming, model.isReady]);
 
   // ── Copy message ───────────────────────────────────────────────────
   const copyMessage = (id, text) => {
@@ -352,11 +474,11 @@ export default function Chat() {
   }
 
   return (
-    <div className="chat-layout">
+    <div className={`chat-layout ${!isSidebarOpen ? 'layout-collapsed' : ''}`}>
       {/* Sidebar */}
-      <div className="conv-sidebar">
+      <div className={`conv-sidebar ${!isSidebarOpen ? 'collapsed' : ''}`}>
         <div className="conv-sidebar-header">
-          <span className="text-sm text-muted">Conversations</span>
+          <span className="sidebar-title text-sm text-muted">Conversations</span>
           <div style={{ display: 'flex', gap: 4 }}>
             <button className="btn-icon" onClick={exportConversations} title="Export all conversations">
               <Download size={14} />
@@ -393,6 +515,21 @@ export default function Chat() {
 
       {/* Chat main */}
       <div className="chat-main">
+        {/* Top actions */}
+        <div className="chat-topbar" style={{
+          padding: '12px 24px', 
+          display: 'flex', 
+          justifyContent: 'flex-start',
+          borderBottom: '1px solid transparent'
+        }}>
+          <button 
+            className="btn-icon" 
+            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+            title={isSidebarOpen ? "Close sidebar" : "Open sidebar"}
+          >
+            {isSidebarOpen ? <PanelLeftClose size={18} className="text-muted" /> : <PanelLeft size={18} className="text-muted" />}
+          </button>
+        </div>
         {threatBanner && (
           <div className={`threat-banner threat-${threatBanner.level}`}>
             <ShieldAlert size={16} />
@@ -410,70 +547,50 @@ export default function Chat() {
         <div className="messages-container">
           {(!activeConv || activeConv.messages.length === 0) && (
             <div className="empty-chat">
-              <Sparkles size={40} className="text-cyan" />
+              <Sparkles size={40} className="text-cyan" style={{ marginBottom: 16 }} />
               <h3>What can I help with?</h3>
-              <p className="text-muted text-sm" style={{ fontFamily: 'system-ui' }}>
-                Ask anything — docs, code, images, audio. All local.
+              <p className="text-muted text-sm hardware-greeting" style={{ fontFamily: 'system-ui', margin: '8px 0 32px 0' }}>
+                Secure environment established. Running privately on your <strong>{model.hwProfile?.gpuInfo?.description || (model.hwProfile?.supportsWebGPU ? 'Local GPU' : 'CPU (WebAssembly)')}</strong> ({model.modelTier || 'UNIVERSAL'} Engine).
               </p>
-              <div className="starter-chips">
-                {['Summarize my documents', 'Explain this code', 'Analyze this image'].map(s => (
-                  <button key={s} className="starter-chip" onClick={() => setInput(s)}>
-                    {s} <ChevronRight size={12} />
-                  </button>
-                ))}
+              
+              <div className="capability-grid">
+                <div className="capability-block" onClick={() => navigate('/vault')}>
+                  <div className="cap-icon-wrap"><FileText size={20} className="text-cyan" /></div>
+                  <div className="cap-text">
+                    <h4>Chat with Documents</h4>
+                    <p>Drop PDFs here or visit the Vault to build your private knowledge base.</p>
+                  </div>
+                </div>
+                
+                <div className="capability-block" onClick={() => fileInputRef.current?.click()}>
+                  <div className="cap-icon-wrap"><Image size={20} className="text-emerald" /></div>
+                  <div className="cap-text">
+                    <h4>Analyze an Image</h4>
+                    <p>Click the image icon to process photos completely offline.</p>
+                  </div>
+                </div>
+
+                <div className="capability-block" onClick={toggleRecording}>
+                  <div className="cap-icon-wrap"><Mic size={20} className="text-purple" /></div>
+                  <div className="cap-text">
+                    <h4>Voice Conversation</h4>
+                    <p>Use the microphone to run local, completely private audio transcription.</p>
+                  </div>
+                </div>
               </div>
             </div>
           )}
 
-          {activeConv?.messages.map(msg => (
-            <div key={msg.id} className={`message-row ${msg.role}`}>
-              <div className="msg-avatar">
-                {msg.role === 'user' ? <User size={16} /> : <Sparkles size={18} fill="currentColor" />}
-              </div>
-              <div className="msg-bubble">
-                {msg.image && <img src={msg.image} alt="attached" className="msg-image" />}
-                {msg._hadImage && !msg.image && (
-                  <div className="text-xs text-muted" style={{ marginBottom: 8, fontStyle: 'italic' }}>
-                    [Image not persisted — reattach to use again]
-                  </div>
-                )}
-                <div className="md-content">
-                  <ReactMarkdown content={msg.content} isStreaming={!!msg.streaming} />
-                  {msg.streaming && <span className="cursor-blink">▍</span>}
-                </div>
-
-                {/* Confidence Score Display - Only for assistant messages */}
-                {msg.role === 'assistant' && !msg.streaming && msg.confidence && (
-                  <div className="confidence-badge" style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 4,
-                    padding: '4px 8px',
-                    marginTop: 8,
-                    borderRadius: 4,
-                    fontSize: 11,
-                    fontWeight: 500,
-                    backgroundColor: msg.confidence.level === 'high' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
-                    color: msg.confidence.level === 'high' ? 'var(--emerald)' : 'var(--amber)',
-                    border: `1px solid ${msg.confidence.level === 'high' ? 'var(--emerald)' : 'var(--amber)'}`,
-                  }}>
-                    <span>{msg.confidence.display}</span>
-                    <div className="confidence-tooltip" title={msg.confidence.explanation}>
-                      <Info size={12} style={{ opacity: 0.7 }} />
-                    </div>
-                  </div>
-                )}
-
-                <div className="msg-footer">
-                  <span className="text-xs text-muted">{msg.timestamp}</span>
-                  {!msg.streaming && (
-                    <button className="btn-icon msg-copy" onClick={() => copyMessage(msg.id, msg.content)}>
-                      {copiedId === msg.id ? <Check size={12} className="text-emerald" /> : <Copy size={12} />}
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
+          {activeConv?.messages.map((msg, index) => (
+            <MessageItem
+              key={msg.id}
+              msg={msg}
+              isLastMsg={index === activeConv.messages.length - 1}
+              onCopy={copyMessage}
+              copiedId={copiedId}
+              onEdit={handleEditMessage}
+              onRetry={handleRetryMessage}
+            />
           ))}
           <div ref={bottomRef} />
         </div>
@@ -536,7 +653,22 @@ export default function Chat() {
             </button>
 
             {isStreaming ? (
-              <button className="btn btn-secondary btn-sm" onClick={() => { abortRef.current = true; setIsStreaming(false); }}>
+              <button 
+                className="btn btn-secondary btn-sm" 
+                onClick={() => { 
+                  abortRef.current = true; 
+                  setIsStreaming(false); 
+                  // Clean up stuck streaming cursors immediately
+                  setConversations(prev => prev.map(c =>
+                    c.id === activeId ? {
+                      ...c,
+                      messages: c.messages.map(m =>
+                        m.streaming ? { ...m, streaming: false } : m
+                      )
+                    } : c
+                  ));
+                }}
+              >
                 <StopCircle size={14} /> Stop
               </button>
             ) : (
@@ -548,6 +680,10 @@ export default function Chat() {
                 <Send size={14} />
               </button>
             )}
+          </div>
+          
+          <div className="text-xs text-muted" style={{ textAlign: 'center', marginTop: 12, opacity: 0.7, maxWidth: 600, alignSelf: 'center', margin: '12px auto 0 auto', lineHeight: 1.4 }}>
+             Sentry AI runs entirely on your device's hardware. For best results, provide context or upload documents for it to analyze, as local models may hallucinate general trivia.
           </div>
         </div>
       </div>
