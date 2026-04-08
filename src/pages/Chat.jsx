@@ -126,7 +126,7 @@ export default function Chat() {
   const abortRef = useRef(false);
   const fileInputRef = useRef(null);
   
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(window.innerWidth > 768);
 
   // ── Security hooks ─────────────────────────────────────────────────
   const { scanInput, threatLog } = useThreatDetector((threat) => {

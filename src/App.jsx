@@ -3,13 +3,14 @@
 // FIXED: Topbar brand visible on mobile without overflow
 import { BrowserRouter, Routes, Route, NavLink, Navigate } from 'react-router-dom';
 import { useState, createContext, useContext } from 'react';
-import { Shield, MessageSquare, FolderOpen, Activity, Menu, X } from 'lucide-react';
+import { Shield, MessageSquare, FolderOpen, Activity, Menu, X, HelpCircle } from 'lucide-react';
 import { useModelManager } from './hooks/useModelManager';
 import { useConnectionStatus } from './hooks/useConnectionStatus';
 import Home from './pages/Home';
 import Chat from './pages/Chat';
 import Vault from './pages/Vault';
 import Audit from './pages/Audit';
+import Help from './pages/Help';
 import './index.css';
 
 // ── Global Context ────────────────────────────────────────────────
@@ -61,6 +62,10 @@ function App() {
                 onClick={() => setSidebarOpen(false)}>
                 <Activity size={18} /> <span>Privacy Audit</span>
               </NavLink>
+              <NavLink to="/help" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+                onClick={() => setSidebarOpen(false)}>
+                <HelpCircle size={18} /> <span>Help & Docs</span>
+              </NavLink>
             </nav>
 
             <div className="sidebar-footer">
@@ -93,6 +98,7 @@ function App() {
               <Route path="/chat" element={<Chat />} />
               <Route path="/vault" element={<Vault />} />
               <Route path="/audit" element={<Audit />} />
+              <Route path="/help" element={<Help />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </main>

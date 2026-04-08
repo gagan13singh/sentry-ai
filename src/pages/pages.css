@@ -1437,6 +1437,129 @@
   .capability-block .cap-icon-wrap {
     margin: 0 auto;
   }
+
+  /* ── Chat UI Mobile Refinements ── */
+  .chat-layout {
+    position: relative;
+  }
+
+  .conv-sidebar {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 100;
+    background: var(--bg-base); /* Block the chat behind it */
+    box-shadow: 10px 0 30px rgba(0, 0, 0, 0.5);
+  }
+
+  .messages-container {
+    padding: 16px 12px 140px 12px; /* Less horizontal padding, keep bottom space for input */
+  }
+
+  .empty-chat {
+    padding: 20px 16px;
+  }
+
+  .empty-chat h3 {
+    font-size: 1.4rem;
+  }
+
+  .message-row {
+    gap: 10px; /* Bring avatar and text closer */
+    margin-bottom: 24px;
+  }
+
+  .msg-avatar {
+    width: 28px;
+    height: 28px;
+  }
+
+  .message-row.user .msg-bubble {
+    max-width: 95%; /* Give more breathing room for text on narrow screens */
+    padding: 12px 16px;
+    font-size: 0.95rem;
+  }
+
+  .chat-input-wrap {
+    padding: 16px 12px 20px 12px; /* Hugs the bottom edge closer like standard apps */
+  }
+
+  .chat-input-bar {
+    padding: 10px 14px;
+    border-radius: 20px;
+    gap: 8px;
+  }
+
+  .chat-textarea {
+    font-size: 1rem; /* Prevent iOS zoom, fits better */
+    padding: 4px;
+  }
+
+  .attached-preview {
+    max-width: 100%;
+    overflow: hidden;
+  }
+}
+
+/* ── Help / FAQ Accordion ── */
+.faq-accordion {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.faq-item {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: all 0.2s ease;
+}
+
+.faq-item.active {
+  border-color: var(--border-hover);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.faq-summary {
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  user-select: none;
+}
+
+.faq-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-primary);
+}
+
+.faq-details {
+  padding: 0 16px 16px 16px;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+.faq-details p {
+  color: var(--text-muted);
+}
+
+.btn-danger {
+  background: rgba(220, 38, 38, 0.1);
+  border: 1px solid rgba(220, 38, 38, 0.3);
+  color: #fca5a5;
+  font-weight: 600;
+}
+
+.btn-danger:hover {
+  background: rgba(220, 38, 38, 0.2);
+  border-color: rgba(220, 38, 38, 0.6);
+  color: #fef2f2;
 }
 
 /* ── WASM mode notice ──────────────────────────────────────────── */
