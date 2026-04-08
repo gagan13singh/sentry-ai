@@ -1,18 +1,46 @@
 // ================================================================
-// Vault.jsx — Knowledge Vault
-// FIXED: removeBySource actually called when deleting files
-// FIXED: ingest progress shown for all stages (extract + embed)
+// Vault.jsx
+//
+// BUG FIXES:
+// 1. processFile called in handleDrop had `model` in its closure but
+//    handleDrop's useCallback dep array only had `model` — if model
+//    changed (became ready mid-session), the old processFile would run
+//    with the stale model. Fixed by splitting processFile into a stable
+//    useCallback with `model` as a dependency.
+//
+// 2. Audio processing used `new AudioContext({ sampleRate: 16000 })`
+//    but never called `audioCtx.close()` — this leaks an AudioContext
+//    per file upload. Fixed with try/finally.
+//
+// 3. `handleDrop` called `Array.from(e.dataTransfer?.files || e.target?.files || [])`
+//    — `e.target.files` is only valid for `<input>` onChange, not for
+//    native drop events.  The drop path now only reads `e.dataTransfer.files`.
+//
+// 4. `handleRemoveFile` did not stop processing files that were in-flight.
+//    If you deleted a file while it was still indexing, the setFiles
+//    update would set it to 'ready' after the delete.  Fixed with an
+//    abortSet ref.
+//
+// 5. `setFiles` in `processFile` called after `handleRemoveFile` removed
+//    the entry.  The status update is now guarded with a check.
+//
+// IMPROVEMENTS:
+// A. Max file size guard (50MB) — large files would hang the UI.
+// B. Duplicate file detection — re-adding the same filename warns the user.
+// C. File type icons are now more specific.
+// D. Search results show a "No results" empty state instead of silently empty.
 // ================================================================
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   FolderOpen, Upload, Search, Trash2, FileText, Image,
-  Mic, X, CheckCircle, AlertCircle, Loader
+  Mic, X, CheckCircle, AlertCircle, Loader, FileCode
 } from 'lucide-react';
 import { useApp } from '../App';
 import { initDB, ingestText, ingestPDF, hybridSearch, getDocumentCount, clearDB, removeBySource } from '../lib/orama';
 
 const VAULT_KEY = 'sentry-ai-vault-files';
+const MAX_FILE_SIZE_MB = 50;
 
 function loadVaultFiles() {
   try { return JSON.parse(localStorage.getItem(VAULT_KEY) || '[]'); }
@@ -25,10 +53,12 @@ export default function Vault() {
   const [docCount, setDocCount] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [query, setQuery] = useState('');
-  const [results, setResults] = useState([]);
+  const [results, setResults] = useState(null); // null = not searched yet
   const [isSearching, setIsSearching] = useState(false);
   const [ingestProgress, setIngestProgress] = useState(null);
   const fileInputRef = useRef(null);
+  // FIX: track which file IDs have been removed mid-processing
+  const removedIds = useRef(new Set());
 
   useEffect(() => {
     initDB().then(() => getDocumentCount().then(setDocCount));
@@ -38,27 +68,27 @@ export default function Vault() {
     localStorage.setItem(VAULT_KEY, JSON.stringify(files));
   }, [files]);
 
-  const handleDrop = useCallback(async (e) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const dropped = Array.from(e.dataTransfer?.files || e.target?.files || []);
-    for (const file of dropped) await processFile(file);
-  }, [model]);
-
-  const processFile = async (file) => {
+  const processFile = useCallback(async (file) => {
     if (!model.isReady) return;
+
+    // IMPROVEMENT: file size guard
+    if (file.size > MAX_FILE_SIZE_MB * 1024 * 1024) {
+      alert(`File "${file.name}" is larger than ${MAX_FILE_SIZE_MB}MB. Please split it into smaller chunks.`);
+      return;
+    }
+
     const type = file.type;
     const name = file.name;
+    const fileId = `${name}-${Date.now()}`;
 
-    const fileEntry = {
-      id: `${name}-${Date.now()}`,
-      name,
-      type: type.startsWith('image') ? 'image' : type.includes('pdf') ? 'pdf' : type.startsWith('audio') ? 'audio' : 'text',
-      size: (file.size / 1024).toFixed(1) + ' KB',
-      addedAt: new Date().toLocaleDateString(),
-      status: 'processing',
-    };
-    setFiles(prev => [fileEntry, ...prev]);
+    // IMPROVEMENT: duplicate detection
+    setFiles(prev => {
+      const duplicate = prev.find(f => f.name === name && f.status === 'ready');
+      if (duplicate) {
+        if (!window.confirm(`"${name}" is already in your vault. Add it again?`)) return prev;
+      }
+      return [{ id: fileId, name, type: resolveType(type), size: (file.size / 1024).toFixed(1) + ' KB', addedAt: new Date().toLocaleDateString(), status: 'processing' }, ...prev];
+    });
 
     try {
       const embedFn = async (text) => {
@@ -68,41 +98,58 @@ export default function Vault() {
 
       if (type.includes('pdf')) {
         await ingestPDF(file, embedFn, (p) => {
-          setIngestProgress({
-            name,
-            stage: p.stage,
-            done: p.done,
-            total: p.total,
-            label: p.stage === 'extract' ? 'Extracting pages…' : 'Building embeddings…',
-          });
+          if (removedIds.current.has(fileId)) return;
+          setIngestProgress({ name, stage: p.stage, done: p.done, total: p.total, label: p.stage === 'extract' ? 'Extracting pages…' : 'Building embeddings…' });
         });
       } else if (type.startsWith('image/')) {
+        if (removedIds.current.has(fileId)) return;
         setIngestProgress({ name, label: 'Captioning image…' });
         const dataUrl = await readFileAsDataUrl(file);
         const caption = await model.captionImage(dataUrl);
         await ingestText(`[Image: ${name}]\n${caption}`, name, 'image', embedFn, () => { });
       } else if (type.startsWith('audio/')) {
+        if (removedIds.current.has(fileId)) return;
         setIngestProgress({ name, label: 'Transcribing audio…' });
         const arrayBuffer = await file.arrayBuffer();
-        const audioCtx = new AudioContext({ sampleRate: 16000 });
-        const decoded = await audioCtx.decodeAudioData(arrayBuffer);
-        const transcript = await model.transcribeAudio(decoded.getChannelData(0));
-        await ingestText(transcript, name, 'audio', embedFn, () => { });
+        let audioCtx;
+        try {
+          // FIX: close AudioContext when done to avoid leaking resources
+          audioCtx = new AudioContext({ sampleRate: 16000 });
+          const decoded = await audioCtx.decodeAudioData(arrayBuffer);
+          const transcript = await model.transcribeAudio(decoded.getChannelData(0));
+          await ingestText(transcript, name, 'audio', embedFn, () => { });
+        } finally {
+          audioCtx?.close();
+        }
       } else {
         const text = await file.text();
         await ingestText(text, name, 'text', embedFn, (p) => {
+          if (removedIds.current.has(fileId)) return;
           setIngestProgress({ name, label: 'Building embeddings…', done: p.done, total: p.total });
         });
       }
 
-      setFiles(prev => prev.map(f => f.id === fileEntry.id ? { ...f, status: 'ready' } : f));
-      setIngestProgress(null);
-      setDocCount(await getDocumentCount());
+      // FIX: only update status if file wasn't removed
+      if (!removedIds.current.has(fileId)) {
+        setFiles(prev => prev.map(f => f.id === fileId ? { ...f, status: 'ready' } : f));
+        setIngestProgress(null);
+        setDocCount(await getDocumentCount());
+      }
     } catch (err) {
-      setFiles(prev => prev.map(f => f.id === fileEntry.id ? { ...f, status: 'error', error: err.message } : f));
-      setIngestProgress(null);
+      if (!removedIds.current.has(fileId)) {
+        setFiles(prev => prev.map(f => f.id === fileId ? { ...f, status: 'error', error: err.message } : f));
+        setIngestProgress(null);
+      }
     }
-  };
+  }, [model]);
+
+  // FIX: drop handler only reads dataTransfer.files
+  const handleDrop = useCallback(async (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const dropped = Array.from(e.dataTransfer?.files || []);
+    for (const file of dropped) await processFile(file);
+  }, [processFile]);
 
   const handleSearch = async () => {
     if (!query.trim() || !model.isReady) return;
@@ -115,13 +162,16 @@ export default function Vault() {
       setResults(hits);
     } catch (e) {
       console.error(e);
+      setResults([]);
     }
     setIsSearching(false);
   };
 
-  // FIXED: actually removes vectors from the DB
   const handleRemoveFile = async (fileId, fileName) => {
+    // FIX: mark as removed so in-flight processFile won't update it
+    removedIds.current.add(fileId);
     setFiles(prev => prev.filter(f => f.id !== fileId));
+    setIngestProgress(prev => prev?.name === fileName ? null : prev);
     try {
       await removeBySource(fileName);
       setDocCount(await getDocumentCount());
@@ -135,16 +185,10 @@ export default function Vault() {
     await clearDB();
     setFiles([]);
     setDocCount(0);
-    setResults([]);
+    setResults(null);
+    removedIds.current.clear();
     localStorage.removeItem(VAULT_KEY);
   };
-
-  const typeIcon = (type) => ({
-    pdf: <FileText size={16} className="text-cyan" />,
-    image: <Image size={16} className="text-purple" />,
-    audio: <Mic size={16} className="text-amber" />,
-    text: <FileText size={16} className="text-emerald" />,
-  }[type] || <FileText size={16} />);
 
   return (
     <div className="vault-page page-content">
@@ -166,6 +210,10 @@ export default function Vault() {
         onDragLeave={() => setIsDragging(false)}
         onDrop={handleDrop}
         onClick={() => model.isReady && fileInputRef.current?.click()}
+        role="button"
+        tabIndex={0}
+        onKeyDown={e => e.key === 'Enter' && model.isReady && fileInputRef.current?.click()}
+        aria-label="Drop zone: click or drag files to upload"
       >
         <input
           ref={fileInputRef}
@@ -179,12 +227,12 @@ export default function Vault() {
         <p className="text-sm" style={{ marginTop: 8 }}>
           {isDragging ? 'Drop to ingest' : 'Drop files or click to upload'}
         </p>
-        <p className="text-xs text-muted">PDF, TXT, MD, PNG, JPG, MP3, WAV · All processed locally</p>
+        <p className="text-xs text-muted">PDF, TXT, MD, PNG, JPG, MP3, WAV · Max {MAX_FILE_SIZE_MB}MB · All processed locally</p>
         {!model.isReady && <p className="text-xs text-amber" style={{ marginTop: 4 }}>Load a model first</p>}
       </div>
 
       {ingestProgress && (
-        <div className="ingest-progress card fade-in">
+        <div className="ingest-progress card fade-in" aria-live="polite">
           <div className="flex items-center gap-3">
             <div className="spinner" />
             <div style={{ flex: 1 }}>
@@ -214,30 +262,45 @@ export default function Vault() {
           onChange={e => setQuery(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && handleSearch()}
           style={{ background: 'none', border: 'none', flex: 1 }}
+          aria-label="Semantic search input"
         />
-        <button className="btn btn-secondary btn-sm" onClick={handleSearch} disabled={isSearching || !model.isReady}>
+        <button
+          className="btn btn-secondary btn-sm"
+          onClick={handleSearch}
+          disabled={isSearching || !model.isReady || !query.trim()}
+        >
           {isSearching ? <Loader size={14} className="spinning" /> : 'Search'}
         </button>
       </div>
 
-      {results.length > 0 && (
+      {/* IMPROVEMENT: search states */}
+      {results !== null && (
         <div className="search-results fade-in">
-          <h4 className="text-sm text-muted" style={{ marginBottom: 12 }}>
-            {results.length} results found
-          </h4>
-          {results.map((r, i) => (
-            <div key={r.id || i} className="result-card card">
-              <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
-                <span className="text-xs text-cyan mono">{r.source}</span>
-                <span className="badge badge-cyan" style={{ fontSize: '0.65rem' }}>
-                  {(r.score * 100).toFixed(0)}% match
-                </span>
-              </div>
-              <p className="text-sm" style={{ color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-                {r.content.slice(0, 300)}{r.content.length > 300 ? '…' : ''}
-              </p>
+          {results.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '32px 0', color: 'var(--text-muted)' }}>
+              <Search size={32} style={{ opacity: 0.3, marginBottom: 8 }} />
+              <p className="text-sm">No results found. Try different keywords.</p>
             </div>
-          ))}
+          ) : (
+            <>
+              <h4 className="text-sm text-muted" style={{ marginBottom: 12 }}>
+                {results.length} results found
+              </h4>
+              {results.map((r, i) => (
+                <div key={r.id || i} className="result-card card">
+                  <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
+                    <span className="text-xs text-cyan mono">{r.source}</span>
+                    <span className="badge badge-cyan" style={{ fontSize: '0.65rem' }}>
+                      {(r.score * 100).toFixed(0)}% match
+                    </span>
+                  </div>
+                  <p className="text-sm" style={{ color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                    {r.content.slice(0, 300)}{r.content.length > 300 ? '…' : ''}
+                  </p>
+                </div>
+              ))}
+            </>
+          )}
         </div>
       )}
 
@@ -247,8 +310,13 @@ export default function Vault() {
             <div key={f.id} className="file-card card">
               <div className="file-card-header">
                 {typeIcon(f.type)}
-                <span className="truncate text-sm" style={{ flex: 1 }}>{f.name}</span>
-                <button className="btn-icon" onClick={() => handleRemoveFile(f.id, f.name)}>
+                <span className="truncate text-sm" style={{ flex: 1 }} title={f.name}>{f.name}</span>
+                <button
+                  className="btn-icon"
+                  onClick={() => handleRemoveFile(f.id, f.name)}
+                  aria-label={`Remove ${f.name}`}
+                  title="Remove from vault"
+                >
                   <X size={14} />
                 </button>
               </div>
@@ -272,6 +340,25 @@ export default function Vault() {
       )}
     </div>
   );
+}
+
+function resolveType(mimeType) {
+  if (mimeType.startsWith('image')) return 'image';
+  if (mimeType.includes('pdf')) return 'pdf';
+  if (mimeType.startsWith('audio')) return 'audio';
+  if (mimeType.includes('javascript') || mimeType.includes('html') || mimeType.includes('css')) return 'code';
+  return 'text';
+}
+
+function typeIcon(type) {
+  const map = {
+    pdf: <FileText size={16} className="text-cyan" />,
+    image: <Image size={16} className="text-purple" />,
+    audio: <Mic size={16} className="text-amber" />,
+    code: <FileCode size={16} className="text-emerald" />,
+    text: <FileText size={16} className="text-emerald" />,
+  };
+  return map[type] || <FileText size={16} />;
 }
 
 function readFileAsDataUrl(file) {

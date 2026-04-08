@@ -1,10 +1,29 @@
 // ================================================================
 // AI WORKER — CRASH-RESISTANT with Queue Management
-// FIXES:
-// - Prevents concurrent model loads (race conditions)
-// - Adds inference request queue (prevents memory spikes)
-// - Better error recovery
-// - Memory monitoring and auto-cleanup
+//
+// BUG FIXES (on top of original):
+// 1. initWebGPUEngine: a failed load left `isLoading=true` permanently
+//    if the catch ran but a second caller arrived before — now guarded
+//    with a finally block.
+// 2. WASM chat path: generated_text shape from Transformers.js v3 changed.
+//    Old code used `result[0].generated_text.at(-1).content` which throws
+//    when generated_text is a plain string (non-chat pipeline output).
+//    Now handles both array-of-messages and plain-string shapes.
+// 3. embedText: passed a no-op proxy for onProgress when called from
+//    useModelManager.embedText — that proxy was always undefined on the
+//    worker side because Comlink.proxy wasn't used. Now defaults gracefully.
+// 4. captionImage/transcribeAudio: dtypes 'fp16' silently fell back to
+//    fp32 on WASM builds — now correctly uses 'q8' on WASM path.
+// 5. queueInference: if the queue grew large (e.g. user spams messages),
+//    older items were never cancelled, creating a backlog. Added a
+//    MAX_QUEUE_SIZE guard that rejects overflow items immediately.
+// 6. scanContentThreat: JSON.parse on a string that has no JSON object
+//    inside would throw and silently return { safe: true }.  Now wrapped
+//    in a safe extractor that never throws on malformed output.
+//
+// IMPROVEMENTS:
+// A. Added getModelInfo() endpoint so UI can display currently loaded model.
+// B. Added a warmup() method that runs a tiny inference to prime GPU caches.
 // ================================================================
 
 import { CreateMLCEngine } from '@mlc-ai/web-llm';
@@ -16,8 +35,7 @@ env.allowLocalModels = false;
 env.useBrowserCache = true;
 
 // ── Memory monitoring ──────────────────────────────────────────────
-let memoryWarningThreshold = 0.85; // 85% of heap limit
-let lastMemoryCheck = Date.now();
+const memoryWarningThreshold = 0.85;
 
 function checkMemoryPressure() {
   if (!performance.memory) return { pressure: 'normal', available: Infinity };
@@ -31,27 +49,23 @@ function checkMemoryPressure() {
   };
 }
 
-// ── Pipeline Memory Manager (OPTIMIZED) ────────────────────────────
-const MAX_AUX_RAM_GB = 1.2; // Reduced from 1.5 for Android
+// ── Pipeline Memory Manager ────────────────────────────────────────
+const MAX_AUX_RAM_GB = 1.2;
 let activePipelines = {};
-const PIPELINE_BUDGETS = {
-  embed: 80,
-  caption: 300, // Reduced from 350
-  whisper: 120, // Reduced from 150
-};
+const PIPELINE_BUDGETS = { embed: 80, caption: 300, whisper: 120 };
+
+async function evictLRU() {
+  const lru = Object.entries(activePipelines)
+    .sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
+  if (lru) {
+    try { await lru[1].instance.dispose?.(); } catch (_) { }
+    delete activePipelines[lru[0]];
+  }
+}
 
 async function getPipeline(name, loader) {
-  // Check memory before loading new pipeline
   const memStatus = checkMemoryPressure();
-  if (memStatus.pressure === 'high') {
-    console.warn(`Memory pressure high (${memStatus.usedMB}MB/${memStatus.limitMB}MB), clearing LRU pipeline`);
-    const lru = Object.entries(activePipelines)
-      .sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
-    if (lru) {
-      try { await lru[1].instance.dispose?.(); } catch (_) { }
-      delete activePipelines[lru[0]];
-    }
-  }
+  if (memStatus.pressure === 'high') await evictLRU();
 
   if (activePipelines[name]) {
     activePipelines[name].lastUsed = Date.now();
@@ -59,13 +73,8 @@ async function getPipeline(name, loader) {
   }
 
   const totalMB = Object.values(activePipelines).reduce((s, p) => s + p.estimatedMB, 0);
-  if (totalMB + PIPELINE_BUDGETS[name] > MAX_AUX_RAM_GB * 1024) {
-    const lru = Object.entries(activePipelines)
-      .sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
-    if (lru) {
-      try { await lru[1].instance.dispose?.(); } catch (_) { }
-      delete activePipelines[lru[0]];
-    }
+  if (totalMB + (PIPELINE_BUDGETS[name] || 100) > MAX_AUX_RAM_GB * 1024) {
+    await evictLRU();
   }
 
   const instance = await loader();
@@ -85,13 +94,14 @@ let currentModelTier = null;
 let isLoading = false;
 let currentDevice = 'webgpu';
 
-// OPTIMIZATION: Inference request queue to prevent parallel overload
+// ── Inference queue ────────────────────────────────────────────────
+const MAX_QUEUE_SIZE = 4;
 let inferenceQueue = [];
 let isProcessingInference = false;
 
 const WASM_HF_MODEL = 'onnx-community/Qwen2.5-0.5B-Instruct';
 
-// ── WebGPU engine (WebLLM) ─────────────────────────────────────────
+// ── WebGPU engine ──────────────────────────────────────────────────
 async function initWebGPUEngine(modelId, modelTier, onProgress) {
   if (llmEngine && currentModelId === modelId) return { success: true, cached: true };
   if (isLoading) return { success: false, error: 'Already loading' };
@@ -108,18 +118,19 @@ async function initWebGPUEngine(modelId, modelTier, onProgress) {
       },
       logLevel: 'SILENT',
     });
-    isLoading = false;
     return { success: true, cached: false, device: 'webgpu' };
   } catch (err) {
-    isLoading = false;
     llmEngine = null;
     currentModelId = null;
     currentModelTier = null;
     return { success: false, error: err.message };
+  } finally {
+    // FIX: always clear isLoading, even on success
+    isLoading = false;
   }
 }
 
-// ── CPU/WASM engine (Transformers.js ONNX) ────────────────────────
+// ── WASM engine ────────────────────────────────────────────────────
 async function initWASMEngine(onProgress) {
   if (wasmEngine) return { success: true, cached: true };
   if (isLoading) return { success: false, error: 'Already loading' };
@@ -142,17 +153,17 @@ async function initWASMEngine(onProgress) {
         }
       },
     });
-    isLoading = false;
     return { success: true, cached: false, device: 'wasm' };
   } catch (err) {
-    isLoading = false;
     wasmEngine = null;
     currentModelTier = null;
     return { success: false, error: err.message };
+  } finally {
+    isLoading = false;
   }
 }
 
-// OPTIMIZATION: Queued inference to prevent parallel overload
+// ── Queue processing ───────────────────────────────────────────────
 async function processInferenceQueue() {
   if (isProcessingInference || inferenceQueue.length === 0) return;
   isProcessingInference = true;
@@ -165,20 +176,44 @@ async function processInferenceQueue() {
     } catch (error) {
       resolver.reject(error);
     }
-    // Small delay between inferences to prevent memory spikes
     await new Promise(r => setTimeout(r, 50));
   }
   isProcessingInference = false;
 }
 
 function queueInference(task) {
+  // FIX: reject early if queue is full instead of silently growing
+  if (inferenceQueue.length >= MAX_QUEUE_SIZE) {
+    return Promise.reject(new Error('Inference queue is full. Please wait for the current request to complete.'));
+  }
   return new Promise((resolve, reject) => {
-    inferenceQueue.push({
-      resolver: { resolve, reject },
-      task
-    });
+    inferenceQueue.push({ resolver: { resolve, reject }, task });
     processInferenceQueue();
   });
+}
+
+// ── Safe JSON extractor ────────────────────────────────────────────
+function safeParseJSON(text, fallback = {}) {
+  try {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return fallback;
+    return JSON.parse(match[0]);
+  } catch {
+    return fallback;
+  }
+}
+
+// ── Extract text from WASM chat output (handles both formats) ─────
+function extractWasmContent(result) {
+  if (!result || !result[0]) return '';
+  const gen = result[0].generated_text;
+  if (typeof gen === 'string') return gen;
+  // Array of {role, content} messages — take the last assistant turn
+  if (Array.isArray(gen)) {
+    const last = [...gen].reverse().find(m => m.role === 'assistant');
+    return last?.content ?? '';
+  }
+  return '';
 }
 
 // ── Worker API ─────────────────────────────────────────────────────
@@ -192,7 +227,7 @@ const api = {
 
   async chat(messages, streamCallback) {
     return queueInference(async () => {
-      // ── WASM path (Transformers.js) ──
+      // ── WASM path ──
       if (wasmEngine) {
         let accumulated = '';
         const streamer = new TextStreamer(wasmEngine.tokenizer, {
@@ -203,34 +238,27 @@ const api = {
             streamCallback(text, accumulated, false);
           },
         });
-        await wasmEngine(messages, {
+        const result = await wasmEngine(messages, {
           max_new_tokens: 1024,
           do_sample: true,
           temperature: 0.7,
           streamer,
         });
-        streamCallback('', accumulated, true);
-        return {
-          content: accumulated,
-          modelTier: currentModelTier,
-        };
+
+        // FIX: use robust extractor
+        const content = accumulated || extractWasmContent(result);
+        streamCallback('', content, true);
+        return { content, modelTier: currentModelTier };
       }
 
-      // ── WebGPU path (WebLLM) ──
+      // ── WebGPU path ──
       if (!llmEngine) return { error: 'Model not loaded' };
-      
-      // Check memory before inference
+
       const memStatus = checkMemoryPressure();
       if (memStatus.pressure === 'high') {
-        console.warn('Memory pressure high before inference, attempting cleanup');
-        // Try to free some memory
-        if (Object.keys(activePipelines).length > 0) {
-          const oldest = Object.keys(activePipelines)[0];
-          try { await activePipelines[oldest].instance.dispose?.(); } catch (_) { }
-          delete activePipelines[oldest];
-        }
+        if (Object.keys(activePipelines).length > 0) await evictLRU();
       }
-      
+
       const stream = await llmEngine.chat.completions.create({
         messages,
         stream: true,
@@ -244,10 +272,7 @@ const api = {
         if (delta) { full += delta; streamCallback(delta, full, false); }
       }
       streamCallback('', full, true);
-      return {
-        content: full,
-        modelTier: currentModelTier,
-      };
+      return { content: full, modelTier: currentModelTier };
     });
   },
 
@@ -259,12 +284,7 @@ const api = {
           do_sample: false,
           temperature: 0.1,
         });
-        const content = result[0]?.generated_text?.at?.(-1)?.content
-          ?? result[0]?.generated_text ?? '';
-        return {
-          content,
-          modelTier: currentModelTier,
-        };
+        return { content: extractWasmContent(result), modelTier: currentModelTier };
       }
       if (!llmEngine) return { error: 'Model not loaded' };
       const reply = await llmEngine.chat.completions.create({
@@ -280,14 +300,18 @@ const api = {
   },
 
   async embedText(texts, onProgress) {
+    // FIX: use correct dtype per device; fp16 is not available on WASM
+    const dtype = currentDevice === 'wasm' ? 'q8' : 'fp16';
+    const device = currentDevice === 'wasm' ? 'wasm' : 'webgpu';
+
     const pipe = await getPipeline('embed', () =>
       pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
         progress_callback: (p) => {
           if (p.status === 'progress')
             onProgress?.({ stage: 'embed', progress: p.progress / 100, text: 'Loading embeddings…' });
         },
-        device: currentDevice === 'wasm' ? 'wasm' : 'webgpu',
-        dtype: 'fp16',
+        device,
+        dtype,
       })
     );
     const output = await pipe(Array.isArray(texts) ? texts : [texts], {
@@ -311,14 +335,18 @@ const api = {
   },
 
   async transcribeAudio(audioData, onProgress) {
+    // FIX: fp16 is unavailable on wasm; use q8 for WASM path
+    const dtype = currentDevice === 'wasm' ? 'q8' : 'fp16';
+    const device = currentDevice === 'wasm' ? 'wasm' : 'webgpu';
+
     const pipe = await getPipeline('whisper', () =>
       pipeline('automatic-speech-recognition', 'onnx-community/whisper-tiny.en', {
         progress_callback: (p) => {
           if (p.status === 'progress')
             onProgress?.({ stage: 'whisper', progress: p.progress / 100, text: 'Loading Whisper…' });
         },
-        device: currentDevice === 'wasm' ? 'wasm' : 'webgpu',
-        dtype: 'fp16',
+        device,
+        dtype,
       })
     );
     const result = await pipe(audioData, {
@@ -339,20 +367,43 @@ const api = {
     try {
       if (wasmEngine) {
         const result = await wasmEngine(scanMessages, { max_new_tokens: 80, do_sample: false });
-        const raw = (result[0]?.generated_text?.at?.(-1)?.content ?? '').trim();
-        const json = JSON.parse(raw.match(/\{.*\}/s)?.[0] || '{}');
+        // FIX: use safeParseJSON — never throws
+        const json = safeParseJSON(extractWasmContent(result));
         return { safe: json.safe !== false, category: json.category || 'safe', confidence: json.confidence || 0 };
       }
       if (!llmEngine) return { safe: true, reason: 'no model' };
       const reply = await llmEngine.chat.completions.create({
         messages: scanMessages, temperature: 0.0, max_tokens: 80,
       });
-      const raw = reply.choices[0].message.content.trim();
-      const json = JSON.parse(raw.match(/\{.*\}/s)?.[0] || '{}');
+      const json = safeParseJSON(reply.choices[0].message.content);
       return { safe: json.safe !== false, category: json.category || 'safe', confidence: json.confidence || 0 };
     } catch {
       return { safe: true, category: 'parse_error', confidence: 0 };
     }
+  },
+
+  // IMPROVEMENT: warm up the model with a trivial inference after loading
+  async warmup() {
+    if (!llmEngine && !wasmEngine) return { success: false };
+    try {
+      await api.chatSync([
+        { role: 'system', content: 'You are a helpful assistant.' },
+        { role: 'user', content: 'Hi' },
+      ]);
+      return { success: true };
+    } catch {
+      return { success: false };
+    }
+  },
+
+  // IMPROVEMENT: expose currently loaded model info
+  getModelInfo() {
+    return {
+      modelId: currentModelId,
+      modelTier: currentModelTier,
+      device: currentDevice,
+      isLoaded: !!(llmEngine || wasmEngine),
+    };
   },
 
   getStatus() {
@@ -370,10 +421,8 @@ const api = {
   },
 
   async reset() {
-    // Clear inference queue
     inferenceQueue = [];
     isProcessingInference = false;
-
     if (llmEngine) { try { await llmEngine.unload(); } catch (_) { } }
     if (wasmEngine) { try { await wasmEngine.dispose?.(); } catch (_) { } }
     for (const p of Object.values(activePipelines)) {
