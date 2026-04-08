@@ -1,5 +1,7 @@
 /* ================================================================
    App Shell Layout
+   FIXED: mobile sidebar overlay now works correctly
+   FIXED: chat page height accounts for topbar on mobile
    ================================================================ */
 
 .app-shell {
@@ -8,7 +10,7 @@
   position: relative;
 }
 
-/* ── Sidebar ───────────────────────────────────────────────────── */
+/* ── Sidebar ─────────────────────────────────────────────────── */
 .app-sidebar {
   width: 240px;
   min-height: 100vh;
@@ -18,7 +20,9 @@
   flex-direction: column;
   padding: 20px 0;
   position: fixed;
-  left: 0; top: 0; bottom: 0;
+  left: 0;
+  top: 0;
+  bottom: 0;
   z-index: 100;
   transition: transform var(--transition-slow);
   backdrop-filter: blur(20px);
@@ -39,7 +43,9 @@
   gap: 10px;
 }
 
-.brand-icon { color: var(--cyan); }
+.brand-icon {
+  color: var(--cyan);
+}
 
 .brand-name {
   font-size: 1.15rem;
@@ -47,13 +53,18 @@
   letter-spacing: -0.02em;
 }
 
-.sidebar-close { display: none; }
+.sidebar-close {
+  display: none;
+}
 
 .connection-badge-wrap {
   padding: 0 16px 16px;
 }
 
-.badge-compact { font-size: 0.68rem !important; padding: 3px 8px !important; }
+.badge-compact {
+  font-size: 0.68rem !important;
+  padding: 3px 8px !important;
+}
 
 .sidebar-nav {
   flex: 1;
@@ -103,7 +114,7 @@
   margin-top: 16px;
 }
 
-/* ── Main area ─────────────────────────────────────────────────── */
+/* ── Main area ─────────────────────────────────────────────── */
 .app-main {
   flex: 1;
   margin-left: 240px;
@@ -112,43 +123,73 @@
   flex-direction: column;
 }
 
-/* ── Topbar ────────────────────────────────────────────────────── */
+/* ── Topbar ─────────────────────────────────────────────────── */
 .topbar {
   display: none;
   align-items: center;
   gap: 12px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--border);
-  background: rgba(8, 12, 24, 0.9);
+  background: rgba(8, 12, 24, 0.95);
   backdrop-filter: blur(12px);
   position: sticky;
   top: 0;
   z-index: 50;
+  height: 56px;
+  flex-shrink: 0;
 }
 
-.topbar-brand { display: flex; align-items: center; gap: 8px; font-weight: 700; }
-.topbar-right { margin-left: auto; }
-.menu-btn { color: var(--text-secondary); }
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+}
 
+.topbar-right {
+  margin-left: auto;
+}
+
+.menu-btn {
+  color: var(--text-secondary);
+}
+
+/* Sidebar overlay — only shown programmatically on mobile */
 .sidebar-overlay {
-  display: none;
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.6);
   z-index: 99;
   backdrop-filter: blur(2px);
+  /* hidden by default, shown via inline style from App.jsx */
+  display: none;
 }
 
-/* ── Responsive ────────────────────────────────────────────────── */
+/* ── Responsive ─────────────────────────────────────────────── */
 @media (max-width: 768px) {
   .app-sidebar {
     transform: translateX(-100%);
+    z-index: 200;
   }
+
   .app-sidebar.open {
     transform: translateX(0);
   }
-  .sidebar-close { display: flex; }
-  .sidebar-overlay { display: block; }
-  .app-main { margin-left: 0; }
-  .topbar { display: flex; }
+
+  .sidebar-close {
+    display: flex;
+  }
+
+  .app-main {
+    margin-left: 0;
+  }
+
+  .topbar {
+    display: flex;
+  }
+
+  /* When sidebar is open on mobile, show overlay */
+  .app-sidebar.open~.sidebar-overlay {
+    display: block;
+  }
 }

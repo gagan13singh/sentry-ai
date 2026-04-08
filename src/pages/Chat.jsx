@@ -1,11 +1,12 @@
 // ================================================================
-// Chat.jsx — OPTIMIZED for Android/Low-End Devices
+// Chat.jsx — FIXED VERSION
 // FIXES:
-// - Virtualized message list (only renders visible messages)
-// - Debounced streaming updates (reduces re-renders by 80%)
-// - Lazy image loading
-// - Memory-efficient model inference queue
-// - Proper cleanup on unmount
+// - TTS: speechSynthesis.getVoices() is async; now uses onvoiceschanged
+// - handleToggleSpeak wrapped in useCallback (was recreated every render)
+// - streamingUpdateTimer cleaned up on activeId change (not just unmount)
+// - layout-collapsed class removed (was a no-op CSS selector)
+// - Mobile sidebar properly handled
+// - useKnowledgeAugment integrated (was built but never used)
 // ================================================================
 
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react';
@@ -15,20 +16,37 @@ import {
   Sparkles, User, Copy, Check, StopCircle, FileText,
   ShieldAlert, ShieldCheck, Download, AlertTriangle, Info,
   Edit2, RefreshCw, PanelLeftClose, PanelLeft, X,
-  Volume2, VolumeX, DownloadCloud
+  Volume2, VolumeX, DownloadCloud, BookOpen
 } from 'lucide-react';
 import { useApp } from '../App';
 import { MODEL_STATUS } from '../hooks/useModelManager';
 import { useThreatDetector } from '../hooks/useThreadDetector';
 import { useClipboardGuard } from '../hooks/useClipboardGuard';
 import { useSessionVault } from '../hooks/useSessionVault';
+import { useKnowledgeAugment } from '../hooks/useKnowledgeAugment';
 import { initDB, hybridSearch } from '../lib/orama';
 import { calculateConfidenceScore } from '../lib/deviceProfile';
 import { PROMPT_TEMPLATES } from '../lib/promptTemplates';
 import ReactMarkdown from '../components/ReactMarkdown';
 
-// ── OPTIMIZATION: Virtualized Message Row ────────────────────────
-const MessageItem = memo(({ msg, isLastMsg, onCopy, copiedId, onEdit, onRetry }) => {
+// ── TTS: Async voice loader ───────────────────────────────────────
+// FIXED: getVoices() returns [] on first call in Chrome until onvoiceschanged fires
+function loadVoices() {
+  return new Promise(resolve => {
+    const voices = window.speechSynthesis.getVoices();
+    if (voices.length > 0) return resolve(voices);
+    const handler = () => {
+      resolve(window.speechSynthesis.getVoices());
+      window.speechSynthesis.onvoiceschanged = null;
+    };
+    window.speechSynthesis.onvoiceschanged = handler;
+    // Fallback: if event never fires (some browsers), resolve empty after 1s
+    setTimeout(() => resolve(window.speechSynthesis.getVoices()), 1000);
+  });
+}
+
+// ── Memoized Message Row ──────────────────────────────────────────
+const MessageItem = memo(({ msg, isLastMsg, onCopy, copiedId, onEdit, onRetry, onToggleSpeak }) => {
   return (
     <div className={`message-row ${msg.role}`}>
       <div className="msg-avatar">
@@ -74,7 +92,7 @@ const MessageItem = memo(({ msg, isLastMsg, onCopy, copiedId, onEdit, onRetry })
             border: `1px solid ${msg.confidence.level === 'high' ? 'var(--emerald)' : 'var(--amber)'}`,
           }}>
             <span>{msg.confidence.display}</span>
-            <div className="confidence-tooltip" title={msg.confidence.explanation}>
+            <div title={msg.confidence.explanation}>
               <Info size={12} style={{ opacity: 0.7 }} />
             </div>
           </div>
@@ -91,7 +109,7 @@ const MessageItem = memo(({ msg, isLastMsg, onCopy, copiedId, onEdit, onRetry })
                 {copiedId === msg.id ? <Check size={14} className="text-emerald" /> : <Copy size={14} />}
               </button>
               {msg.role === 'assistant' && (
-                <button className="btn-icon" onClick={() => onToggleSpeak(msg.id, msg.content)} title={msg.isSpeaking ? "Stop TTS" : "Read aloud"}>
+                <button className="btn-icon" onClick={() => onToggleSpeak(msg.id, msg.content)} title={msg.isSpeaking ? 'Stop TTS' : 'Read aloud'}>
                   {msg.isSpeaking ? <VolumeX size={14} className="text-amber" /> : <Volume2 size={14} />}
                 </button>
               )}
@@ -112,7 +130,6 @@ const MessageItem = memo(({ msg, isLastMsg, onCopy, copiedId, onEdit, onRetry })
     </div>
   );
 }, (prev, next) => {
-  // OPTIMIZATION: Only re-render if content, streaming state, or last message status changes
   return (
     prev.msg.content === next.msg.content &&
     prev.msg.streaming === next.msg.streaming &&
@@ -130,9 +147,7 @@ function stripImagesForStorage(conversations) {
   return conversations.map(conv => ({
     ...conv,
     messages: conv.messages.map(msg =>
-      msg.image
-        ? { ...msg, image: null, _hadImage: true }
-        : msg
+      msg.image ? { ...msg, image: null, _hadImage: true } : msg
     ),
   }));
 }
@@ -141,6 +156,7 @@ export default function Chat() {
   const { model } = useApp();
   const navigate = useNavigate();
   const vault = useSessionVault();
+  const { analyzeQuery, buildCutoffContext, cutoffWarning, showCutoffWarning, dismissWarning } = useKnowledgeAugment();
 
   const [conversations, setConversations] = useState([]);
   const [activeId, setActiveId] = useState(null);
@@ -152,6 +168,8 @@ export default function Chat() {
   const [ragContext, setRagContext] = useState([]);
   const [threatBanner, setThreatBanner] = useState(null);
   const [piiWarning, setPiiWarning] = useState(null);
+  const [speakingId, setSpeakingId] = useState(null);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(window.innerWidth > 768);
 
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
@@ -159,14 +177,14 @@ export default function Chat() {
   const audioChunks = useRef([]);
   const abortRef = useRef(false);
   const fileInputRef = useRef(null);
-  const utteranceRef = useRef(null); // Prevent utterance garbage collection
+  const utteranceRef = useRef(null);
 
-  // OPTIMIZATION: Debounced streaming updates
+  // FIXED: Debounce timer tracked per activeId so switching conversations
+  // cancels pending updates for the old conversation
   const streamingUpdateTimer = useRef(null);
   const pendingStreamUpdate = useRef(null);
-
-  const [isSidebarOpen, setIsSidebarOpen] = useState(window.innerWidth > 768);
-  const [speakingId, setSpeakingId] = useState(null);
+  const activeIdRef = useRef(activeId);
+  useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
 
   const { scanInput, threatLog } = useThreatDetector((threat) => {
     if (!threat.safe) {
@@ -194,14 +212,18 @@ export default function Chat() {
       });
     });
     initDB();
-
-    // OPTIMIZATION: Cleanup on unmount
     return () => {
-      if (streamingUpdateTimer.current) {
-        clearTimeout(streamingUpdateTimer.current);
-      }
+      if (streamingUpdateTimer.current) clearTimeout(streamingUpdateTimer.current);
     };
   }, []);
+
+  // FIXED: also cancel pending stream updates when switching conversations
+  useEffect(() => {
+    return () => {
+      if (streamingUpdateTimer.current) clearTimeout(streamingUpdateTimer.current);
+      pendingStreamUpdate.current = null;
+    };
+  }, [activeId]);
 
   useEffect(() => {
     if (conversations.length > 0) {
@@ -215,7 +237,7 @@ export default function Chat() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeConv?.messages.length]); // OPTIMIZATION: Only scroll on message count change, not content
+  }, [activeConv?.messages.length]);
 
   const handleInputChange = (e) => {
     const textarea = e.target;
@@ -231,9 +253,10 @@ export default function Chat() {
     }
   };
 
-  const handlePaste = useCallback(createPasteHandler((pastedText) => {
-    setInput(prev => prev + pastedText);
-  }, input), [createPasteHandler, input]);
+  const handlePaste = useCallback(
+    createPasteHandler((text) => setInput(prev => prev + text), input),
+    [createPasteHandler, input]
+  );
 
   const checkPII = (text) => {
     const patterns = [
@@ -272,7 +295,7 @@ export default function Chat() {
         mediaRecRef.current = recorder;
         recorder.start();
         setIsRecording(true);
-      } catch (err) {
+      } catch {
         alert('Microphone access denied');
       }
     }
@@ -290,36 +313,24 @@ export default function Chat() {
     }
   };
 
-  // OPTIMIZATION: Debounced stream update batching
   const debouncedStreamUpdate = useCallback((assistantId, content, done) => {
-    pendingStreamUpdate.current = { assistantId, content, done };
-    if (streamingUpdateTimer.current) {
-      clearTimeout(streamingUpdateTimer.current);
-    }
-
-    // Batch updates every 100ms during streaming, immediate when done
+    pendingStreamUpdate.current = { assistantId, content, done, convId: activeIdRef.current };
+    if (streamingUpdateTimer.current) clearTimeout(streamingUpdateTimer.current);
     const delay = done ? 0 : 100;
-
     streamingUpdateTimer.current = setTimeout(() => {
       const update = pendingStreamUpdate.current;
       if (!update) return;
-      
       setConversations(prev => prev.map(c =>
-        c.id === activeId ? {
+        c.id === update.convId ? {
           ...c,
           messages: c.messages.map(m =>
-            m.id === update.assistantId ? { 
-              ...m, 
-              content: update.content, 
-              streaming: !update.done 
-            } : m
+            m.id === update.assistantId ? { ...m, content: update.content, streaming: !update.done } : m
           ),
         } : c
       ));
-      
       pendingStreamUpdate.current = null;
     }, delay);
-  }, [activeId]);
+  }, []);
 
   const runInteraction = async (userText, attachedImg, currentMsgs) => {
     setIsStreaming(true);
@@ -331,6 +342,10 @@ export default function Chat() {
       setTimeout(() => setPiiWarning(null), 6000);
     }
 
+    // INTEGRATED: knowledge cutoff warning
+    const { needsWarning, reason } = analyzeQuery(userText);
+    if (needsWarning) showCutoffWarning(reason);
+
     await scanInput(userText);
 
     const userMsg = {
@@ -341,21 +356,23 @@ export default function Chat() {
       timestamp: new Date().toLocaleTimeString(),
     };
 
+    const convId = activeIdRef.current;
     const updatedMsgs = [...currentMsgs, userMsg];
 
     setConversations(prev => prev.map(c =>
-      c.id === activeId ? { ...c, messages: updatedMsgs } : c
+      c.id === convId ? { ...c, messages: updatedMsgs } : c
     ));
 
     const ragText = await searchRAG(userText);
     const hasRagContext = ragText.length > 0;
     const ragSources = hasRagContext ? [...new Set(ragContext.map(r => r.source))] : [];
+    const cutoffCtx = buildCutoffContext(hasRagContext);
 
-    const systemPrompt = `You are Sentry AI, a private local AI assistant. Be helpful, accurate, and concise.\n\nCRITICAL: You MUST format ALL mathematical expressions and equations using LaTeX. You MUST wrap inline math in $...$ (e.g. $x^2=4$) and block math in $$...$$ (e.g. $$E=mc^2$$). DO NOT output plain LaTeX without the $ or $$ wrappers.${hasRagContext ? `\n\nContext from user documents:\n${ragText.slice(0, 4000)}` : ''}`; // OPTIMIZATION: Truncate RAG context to 4000 chars
+    const systemPrompt = `You are Sentry AI, a private local AI assistant. Be helpful, accurate, and concise.\n\nCRITICAL: You MUST format ALL mathematical expressions and equations using LaTeX. You MUST wrap inline math in $...$ (e.g. $x^2=4$) and block math in $$...$$ (e.g. $$E=mc^2$$). DO NOT output plain LaTeX without the $ or $$ wrappers.${hasRagContext ? `\n\nContext from user documents:\n${ragText.slice(0, 4000)}` : ''}${cutoffCtx}`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
-      ...currentMsgs.slice(-10).filter(m => !m.streaming).map(m => ({ // OPTIMIZATION: Limit context window to last 10 messages
+      ...currentMsgs.slice(-10).filter(m => !m.streaming).map(m => ({
         role: m.role,
         content: m.content,
       })),
@@ -374,7 +391,7 @@ export default function Chat() {
     };
 
     setConversations(prev => prev.map(c =>
-      c.id === activeId ? { ...c, messages: [...updatedMsgs, assistantMsg] } : c
+      c.id === convId ? { ...c, messages: [...updatedMsgs, assistantMsg] } : c
     ));
 
     const inferenceStartTime = performance.now();
@@ -394,33 +411,20 @@ export default function Chat() {
           elapsed: elapsedSecs.toFixed(1),
           tps: (approxTokens / Math.max(elapsedSecs, 0.1)).toFixed(1),
         };
+        const confidence = calculateConfidenceScore(hasRagContext, model.modelTier || 'BALANCED', result.content.length);
 
-        const confidence = calculateConfidenceScore(
-          hasRagContext,
-          model.modelTier || 'BALANCED',
-          result.content.length
-        );
-
-        // Final update with confidence score
         setConversations(prev => prev.map(c =>
-          c.id === activeId ? {
+          c.id === convId ? {
             ...c,
             messages: c.messages.map(m =>
-              m.id === assistantId ? {
-                ...m,
-                content: result.content,
-                streaming: false,
-                confidence,
-                metrics,
-              } : m
+              m.id === assistantId ? { ...m, content: result.content, streaming: false, confidence, metrics } : m
             ),
           } : c
         ));
 
-        // Update conversation title if first message
         if (currentMsgs.length === 0) {
           setConversations(prev => prev.map(c => {
-            if (c.id === activeId) {
+            if (c.id === convId) {
               const title = userText.slice(0, 40) + (userText.length > 40 ? '…' : '');
               return { ...c, title };
             }
@@ -431,14 +435,10 @@ export default function Chat() {
     } catch (err) {
       console.error('Chat error:', err);
       setConversations(prev => prev.map(c =>
-        c.id === activeId ? {
+        c.id === convId ? {
           ...c,
           messages: c.messages.map(m =>
-            m.id === assistantId ? {
-              ...m,
-              content: 'Error: ' + err.message,
-              streaming: false,
-            } : m
+            m.id === assistantId ? { ...m, content: 'Error: ' + err.message, streaming: false } : m
           ),
         } : c
       ));
@@ -452,13 +452,9 @@ export default function Chat() {
     if ((!input.trim() && !attachedImage) || !model.isReady || isStreaming) return;
     const userText = input.trim();
     const currentImg = attachedImage;
-
     setInput('');
     setAttachedImage(null);
-    if (inputRef.current) {
-      inputRef.current.style.height = 'auto';
-    }
-
+    if (inputRef.current) inputRef.current.style.height = 'auto';
     await runInteraction(userText, currentImg, activeConv.messages);
   };
 
@@ -485,22 +481,68 @@ export default function Chat() {
       if (c) {
         const index = c.messages.findIndex(m => m.id === msgId);
         if (index > 0) {
-           const userMsg = c.messages[index - 1];
-           userText = userMsg.content;
-           attachedImg = userMsg.image;
-           prevMsgs = c.messages.slice(0, index - 1);
-           return prev.map(conv => conv.id === activeId ? { ...conv, messages: prevMsgs } : conv);
+          const userMsg = c.messages[index - 1];
+          userText = userMsg.content;
+          attachedImg = userMsg.image;
+          prevMsgs = c.messages.slice(0, index - 1);
+          return prev.map(conv => conv.id === activeId ? { ...conv, messages: prevMsgs } : conv);
         }
       }
       return prev;
     });
 
     if (userText) {
-      setTimeout(() => {
-        runInteraction(userText, attachedImg, prevMsgs);
-      }, 0);
+      setTimeout(() => runInteraction(userText, attachedImg, prevMsgs), 0);
     }
   }, [activeId, isStreaming, model.isReady]);
+
+  // FIXED: async voice loading — no more silent TTS
+  const handleToggleSpeak = useCallback(async (msgId, text) => {
+    if (speakingId === msgId) {
+      window.speechSynthesis.cancel();
+      utteranceRef.current = null;
+      setSpeakingId(null);
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+    utteranceRef.current = null;
+
+    const cleanText = text.replace(/[*_#`$[\]()]/g, '').trim();
+    if (!cleanText) return;
+
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+    utteranceRef.current = utterance; // prevents GC in Chrome
+
+    // FIXED: wait for voices to be available
+    try {
+      const voices = await loadVoices();
+      if (voices.length > 0) {
+        const voice =
+          voices.find(v => v.name.includes('Google US English')) ||
+          voices.find(v => v.lang.startsWith('en') && !v.name.includes('eSpeak')) ||
+          voices[0];
+        if (voice) utterance.voice = voice;
+      }
+    } catch {
+      // proceed without a specific voice
+    }
+
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    utterance.onend = () => {
+      utteranceRef.current = null;
+      setSpeakingId(null);
+    };
+    utterance.onerror = (e) => {
+      if (e.error !== 'interrupted') console.warn('TTS error:', e.error);
+      utteranceRef.current = null;
+      setSpeakingId(null);
+    };
+
+    window.speechSynthesis.speak(utterance);
+    setSpeakingId(msgId);
+  }, [speakingId]);
 
   const copyMessage = (id, text) => {
     navigator.clipboard.writeText(text);
@@ -521,10 +563,9 @@ export default function Chat() {
 
   const exportAsMarkdown = () => {
     if (!activeConv || activeConv.messages.length === 0) return;
-    const md = activeConv.messages.map(m => 
+    const md = activeConv.messages.map(m =>
       `**${m.role === 'user' ? 'You' : 'Sentry AI'}** _(${m.timestamp})_:\n${m.content}\n\n`
     ).join('---\n\n');
-    
     const blob = new Blob([`# ${activeConv.title}\n\n${md}`], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -532,42 +573,6 @@ export default function Chat() {
     a.download = `${activeConv.title.replace(/\s+/g, '-').toLowerCase()}-${Date.now()}.md`;
     a.click();
     URL.revokeObjectURL(url);
-  };
-
-  const handleToggleSpeak = (msgId, text) => {
-    if (speakingId === msgId) {
-      window.speechSynthesis.cancel();
-      setSpeakingId(null);
-    } else {
-      window.speechSynthesis.cancel();
-      // Keep only letters, numbers, basic punctuation for reliable TTS.
-      let cleanText = text.replace(/[*_#`$[\]()]/g, ''); 
-      
-      // If the text is completely empty after cleaning, don't try to speak
-      if (!cleanText.trim()) return;
-
-      const utterance = new SpeechSynthesisUtterance(cleanText);
-      utteranceRef.current = utterance; // crucial: prevents Chrome from arbitrarily silencing it during garbage collection
-
-      // Explicitly pick a nice voice if available (sometimes defaults are broken)
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) {
-        const voice = voices.find(v => v.name.includes('Google US English')) 
-                   || voices.find(v => v.lang.includes('en'));
-        if (voice) utterance.voice = voice;
-      }
-
-      utterance.rate = 1.0;
-      utterance.pitch = 1.0;
-      utterance.onend = () => setSpeakingId(null);
-      utterance.onerror = (e) => {
-        console.warn('Speech synthesis error:', e);
-        setSpeakingId(null);
-      };
-
-      window.speechSynthesis.speak(utterance);
-      setSpeakingId(msgId);
-    }
   };
 
   const newChat = () => {
@@ -584,6 +589,18 @@ export default function Chat() {
     });
   };
 
+  const stopStreaming = useCallback(() => {
+    abortRef.current = true;
+    setIsStreaming(false);
+    if (streamingUpdateTimer.current) clearTimeout(streamingUpdateTimer.current);
+    setConversations(prev => prev.map(c =>
+      c.id === activeId ? {
+        ...c,
+        messages: c.messages.map(m => m.streaming ? { ...m, streaming: false } : m),
+      } : c
+    ));
+  }, [activeId]);
+
   if (!model.isReady) {
     return (
       <div className="not-ready-state">
@@ -598,7 +615,17 @@ export default function Chat() {
   }
 
   return (
-    <div className={`chat-layout ${!isSidebarOpen ? 'layout-collapsed' : ''}`}>
+    // FIXED: removed 'layout-collapsed' class (was a no-op selector)
+    <div className="chat-layout">
+      {/* Mobile sidebar overlay */}
+      {isSidebarOpen && window.innerWidth <= 768 && (
+        <div
+          className="sidebar-overlay"
+          style={{ display: 'block' }}
+          onClick={() => setIsSidebarOpen(false)}
+        />
+      )}
+
       {/* Sidebar */}
       <div className={`conv-sidebar ${!isSidebarOpen ? 'collapsed' : ''}`}>
         <div className="conv-sidebar-header">
@@ -617,7 +644,7 @@ export default function Chat() {
             <div
               key={c.id}
               className={`conv-item ${c.id === activeId ? 'active' : ''}`}
-              onClick={() => setActiveId(c.id)}
+              onClick={() => { setActiveId(c.id); if (window.innerWidth <= 768) setIsSidebarOpen(false); }}
             >
               <FileText size={14} className="text-muted" />
               <span className="conv-title truncate">{c.title}</span>
@@ -639,39 +666,52 @@ export default function Chat() {
 
       {/* Chat main */}
       <div className="chat-main">
-        <div className="chat-topbar" style={{
-          padding: '12px 24px', 
-          display: 'flex', 
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          borderBottom: '1px solid transparent'
-        }}>
-          <button 
-            className="btn-icon" 
+        <div className="chat-topbar">
+          <button
+            className="btn-icon"
             onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-            title={isSidebarOpen ? "Close sidebar" : "Open sidebar"}
+            title={isSidebarOpen ? 'Close sidebar' : 'Open sidebar'}
           >
-            {isSidebarOpen ? <PanelLeftClose size={18} className="text-muted" /> : <PanelLeft size={18} className="text-muted" />}
+            {isSidebarOpen
+              ? <PanelLeftClose size={18} className="text-muted" />
+              : <PanelLeft size={18} className="text-muted" />
+            }
           </button>
 
+          <span className="truncate text-sm text-muted" style={{ flex: 1, marginLeft: 8 }}>
+            {activeConv?.title || 'New Chat'}
+          </span>
+
           {activeConv?.messages.length > 0 && (
-            <button className="btn btn-secondary btn-sm" onClick={exportAsMarkdown} title="Export Chat as Markdown">
-              <DownloadCloud size={14} /> <span style={{fontSize: 12}}>Export ML</span>
+            <button className="btn btn-secondary btn-sm" onClick={exportAsMarkdown} title="Export as Markdown">
+              <DownloadCloud size={14} /> <span style={{ fontSize: 12 }}>Export</span>
             </button>
           )}
         </div>
-        
+
+        {/* Banners */}
         {threatBanner && (
           <div className={`threat-banner threat-${threatBanner.level}`}>
             <ShieldAlert size={16} />
             <span className="text-sm">{threatBanner.message}</span>
-            <button className="btn-icon" onClick={() => setThreatBanner(null)} style={{ marginLeft: 'auto' }}>✕</button>
+            <button className="btn-icon" onClick={() => setThreatBanner(null)} style={{ marginLeft: 'auto' }}>
+              <X size={14} />
+            </button>
           </div>
         )}
         {piiWarning && (
           <div className="pii-banner">
             <AlertTriangle size={14} className="text-amber" />
             <span className="text-xs">{piiWarning}</span>
+          </div>
+        )}
+        {cutoffWarning && (
+          <div className="cutoff-banner">
+            <BookOpen size={14} />
+            <span>{cutoffWarning}</span>
+            <button className="btn-icon" onClick={dismissWarning} style={{ marginLeft: 'auto', padding: 2 }}>
+              <X size={12} />
+            </button>
           </div>
         )}
 
@@ -681,9 +721,11 @@ export default function Chat() {
               <Sparkles size={40} className="text-cyan" style={{ marginBottom: 16 }} />
               <h3>What can I help with?</h3>
               <p className="text-muted text-sm hardware-greeting" style={{ fontFamily: 'system-ui', margin: '8px 0 32px 0' }}>
-                Secure environment established. Running privately on your <strong>{model.hwProfile?.gpuInfo?.description || (model.hwProfile?.supportsWebGPU ? 'Local GPU' : 'CPU (WebAssembly)')}</strong> ({model.modelTier || 'UNIVERSAL'} Engine).
+                Secure environment established. Running privately on your{' '}
+                <strong>{model.hwProfile?.gpuInfo?.description || (model.hwProfile?.supportsWebGPU ? 'Local GPU' : 'CPU (WebAssembly)')}</strong>{' '}
+                ({model.modelTier || 'UNIVERSAL'} Engine).
               </p>
-              
+
               <div className="capability-grid">
                 <div className="capability-block" onClick={() => navigate('/vault')}>
                   <div className="cap-icon-wrap"><FileText size={20} className="text-cyan" /></div>
@@ -692,7 +734,6 @@ export default function Chat() {
                     <p>Drop PDFs here or visit the Vault to build your private knowledge base.</p>
                   </div>
                 </div>
-                
                 <div className="capability-block" onClick={() => fileInputRef.current?.click()}>
                   <div className="cap-icon-wrap"><Image size={20} className="text-emerald" /></div>
                   <div className="cap-text">
@@ -700,7 +741,6 @@ export default function Chat() {
                     <p>Click the image icon to process photos completely offline.</p>
                   </div>
                 </div>
-
                 <div className="capability-block" onClick={toggleRecording}>
                   <div className="cap-icon-wrap"><Mic size={20} className="text-purple" /></div>
                   <div className="cap-text">
@@ -712,18 +752,15 @@ export default function Chat() {
 
               <div style={{ marginTop: 24, marginBottom: 100 }}>
                 <p className="text-muted text-xs" style={{ marginBottom: 12, textTransform: 'uppercase', letterSpacing: 1, fontWeight: 600 }}>Quick Prompts</p>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', position: 'relative', zIndex: 10 }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center' }}>
                   {PROMPT_TEMPLATES.map(tpl => (
-                    <button 
-                      key={tpl.id} 
-                      className="btn btn-secondary" 
+                    <button
+                      key={tpl.id}
+                      className="btn btn-secondary"
                       style={{ fontSize: 12, padding: '6px 12px', background: 'var(--bg-secondary)', border: '1px solid var(--border)' }}
-                      onClick={() => {
-                        setInput(tpl.prompt);
-                        if (inputRef.current) inputRef.current.focus();
-                      }}
+                      onClick={() => { setInput(tpl.prompt); inputRef.current?.focus(); }}
                     >
-                      <span style={{ marginRight: 6 }}>{tpl.icon}</span> {tpl.name}
+                      <span style={{ marginRight: 6 }}>{tpl.icon}</span>{tpl.name}
                     </button>
                   ))}
                 </div>
@@ -734,7 +771,7 @@ export default function Chat() {
           {activeConv?.messages.map((msg, index) => (
             <MessageItem
               key={msg.id}
-              msg={{...msg, isSpeaking: speakingId === msg.id}}
+              msg={{ ...msg, isSpeaking: speakingId === msg.id }}
               isLastMsg={index === activeConv.messages.length - 1}
               onCopy={copyMessage}
               copiedId={copiedId}
@@ -746,6 +783,7 @@ export default function Chat() {
           <div ref={bottomRef} style={{ height: 120, flexShrink: 0, width: '100%' }} />
         </div>
 
+        {/* Input area */}
         <div className="chat-input-wrap">
           {attachedImage && (
             <div className="attached-preview">
@@ -764,7 +802,7 @@ export default function Chat() {
               style={{ display: 'none' }}
               onChange={e => e.target.files[0] && handleImageFile(e.target.files[0])}
             />
-            <button className="btn-icon" onClick={() => fileInputRef.current?.click()} title="Attach image">
+            <button className="btn-icon chat-icon-btn" onClick={() => fileInputRef.current?.click()} title="Attach image">
               <Image size={18} />
             </button>
 
@@ -795,25 +833,7 @@ export default function Chat() {
             </button>
 
             {isStreaming ? (
-              <button 
-                className="btn btn-secondary btn-sm" 
-                onClick={() => { 
-                  abortRef.current = true; 
-                  setIsStreaming(false);
-                  // Clear any pending stream updates
-                  if (streamingUpdateTimer.current) {
-                    clearTimeout(streamingUpdateTimer.current);
-                  }
-                  setConversations(prev => prev.map(c =>
-                    c.id === activeId ? {
-                      ...c,
-                      messages: c.messages.map(m =>
-                        m.streaming ? { ...m, streaming: false } : m
-                      )
-                    } : c
-                  ));
-                }}
-              >
+              <button className="btn btn-secondary btn-sm stop-btn" onClick={stopStreaming}>
                 <StopCircle size={14} /> Stop
               </button>
             ) : (
@@ -826,9 +846,9 @@ export default function Chat() {
               </button>
             )}
           </div>
-          
-          <div className="text-xs text-muted" style={{ textAlign: 'center', marginTop: 12, opacity: 0.7, maxWidth: 600, alignSelf: 'center', margin: '12px auto 0 auto', lineHeight: 1.4 }}>
-             Sentry AI runs entirely on your device's hardware. For best results, provide context or upload documents for it to analyze, as local models may hallucinate general trivia.
+
+          <div className="chat-disclaimer">
+            Sentry AI runs entirely on your device's hardware. For best results, upload documents for it to analyze, as local models may hallucinate general trivia.
           </div>
         </div>
       </div>
