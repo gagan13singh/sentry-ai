@@ -16,18 +16,18 @@ export default function Home() {
 
   return (
     <div className="home-page">
-      <div className="how-it-works-wrap fade-in">
-        <button 
-          className="btn btn-secondary" 
-          onClick={() => setShowAbout(true)} 
-          style={{ background: 'rgba(255,255,255,0.08)', borderRadius: '100px', fontWeight: 500 }}
-        >
-          <Info size={16} /> How it Works
-        </button>
-      </div>
-
       {/* ── Hero ── */}
       <section className="hero-section">
+        <div className="how-it-works-wrap fade-in">
+          <button 
+            className="btn btn-secondary how-it-works-btn" 
+            onClick={() => setShowAbout(true)} 
+            style={{ background: 'rgba(255,255,255,0.08)', borderRadius: '100px', fontWeight: 500, fontSize: '0.85rem', padding: '6px 12px' }}
+          >
+            <Info size={14} /> <span className="btn-label">How it Works</span>
+          </button>
+        </div>
+
         <div className="hero-glow" />
         <div className="hero-content">
           <div className="hero-badge fade-in">

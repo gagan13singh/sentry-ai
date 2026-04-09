@@ -56,7 +56,7 @@ function App() {
           href="#main-content"
           style={{
             position: 'absolute',
-            top: -40,
+            top: -1000,
             left: 0,
             zIndex: 9999,
             background: 'var(--cyan)',
@@ -66,7 +66,7 @@ function App() {
             transition: 'top 0.2s',
           }}
           onFocus={e => { e.target.style.top = '0'; }}
-          onBlur={e => { e.target.style.top = '-40px'; }}
+          onBlur={e => { e.target.style.top = '-1000px'; }}
         >
           Skip to content
         </a>

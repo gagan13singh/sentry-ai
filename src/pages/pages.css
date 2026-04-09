@@ -47,7 +47,7 @@
 
 .hero-section {
   position: relative;
-  padding: 80px 48px 48px;
+  padding: 40px 48px 48px;
   overflow: hidden;
 }
 
@@ -1233,8 +1233,8 @@
 /* ── How-it-works button ── */
 .how-it-works-wrap {
   position: absolute;
-  top: 20px;
-  right: 30px;
+  top: 40px;
+  right: 48px;
   z-index: 100;
 }
 
@@ -1350,7 +1350,7 @@
 
   /* ── Home ── */
   .hero-section {
-    padding: 40px 20px 24px;
+    padding: 24px 20px 24px;
   }
 
   .hero-title {
@@ -1374,13 +1374,25 @@
   }
 
   .how-it-works-wrap {
-    top: 70px;
-    right: 16px;
+    position: absolute;
+    top: 24px;
+    right: 20px;
+    z-index: 100;
   }
 
-  .how-it-works-wrap button {
-    padding: 6px 12px;
-    font-size: 0.8rem;
+  .how-it-works-btn .btn-label {
+    display: none;
+  }
+
+  .how-it-works-btn {
+    width: 36px;
+    height: 36px;
+    padding: 0 !important;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50% !important;
+    min-width: unset;
   }
 
   .hardware-greeting {
