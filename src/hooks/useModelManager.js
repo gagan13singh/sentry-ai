@@ -21,8 +21,8 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as Comlink from 'comlink';
-import { detectHardwareProfile, getModelTierFromId } from '../lib/deviceProfile';
-import { isModelCached, markModelCached, getStorageInfo } from '../lib/opfs';
+import { detectHardwareProfile } from '../lib/deviceProfile';
+import { markModelCached, getStorageInfo } from '../lib/opfs';
 
 export const MODEL_STATUS = {
   IDLE: 'idle',
@@ -96,9 +96,6 @@ export function useModelManager() {
   }, []);
 
   const loadModel = useCallback(async (overrideModelId = null, overrideTier = null) => {
-    const api = apiRef.current;
-    if (!api) return;
-
     // FIX: always get a fresh profile — don't rely on potentially stale state
     let profile = await detectHardware();
 
@@ -117,12 +114,108 @@ export function useModelManager() {
       return;
     }
 
-    const device = profile.model?.device || (profile.supportsWebGPU && !profile.isFallbackAdapter ? 'webgpu' : 'wasm');
-
     setModelId(targetModel);
     setModelTier(targetTier);
-    setStatus(MODEL_STATUS.LOADING);
     setError(null);
+
+    if (targetModel === 'chrome-gemini-nano') {
+      setStatus(MODEL_STATUS.LOADING);
+      setProgress({ stage: 'init', text: 'Locating Chrome Prompt API…', percent: 20 });
+      try {
+        const hasGlobalLM = typeof window.LanguageModel !== 'undefined' && typeof window.LanguageModel.create === 'function';
+
+        let aiNS = null;
+        if (!hasGlobalLM) {
+          aiNS =
+            (typeof ai !== 'undefined' && ai?.languageModel ? ai :
+            typeof ai !== 'undefined' && ai?.assistant ? ai :
+            typeof ai !== 'undefined' && ai?.createTextSession ? ai :
+            window?.ai?.languageModel ? window.ai :
+            window?.ai?.assistant ? window.ai :
+            window?.ai?.createTextSession ? window.ai :
+            null);
+        }
+
+        if (!hasGlobalLM && !aiNS) {
+          throw new Error(
+            'Chrome Prompt API not found. Make sure you:\n' +
+            '1. Are using Chrome 129+ (not Firefox, Edge, or Safari)\n' +
+            '2. Enabled the "Prompt API for Gemini Nano" flags in chrome://flags\n' +
+            '3. Clicked "Relaunch" at the bottom of the flags page after enabling'
+          );
+        }
+
+        setProgress({ stage: 'check', text: 'Checking Gemini Nano availability…', percent: 40 });
+
+        if (hasGlobalLM) {
+          const availability = await window.LanguageModel.availability();
+          if (availability === 'unavailable') {
+            throw new Error(
+              'Gemini Nano is not available on this device. Your hardware may not meet Google\'s requirements (needs 22+ GB of storage free and 8+ GB RAM).'
+            );
+          }
+          if (availability === 'downloading') {
+            throw new Error(
+              'Gemini Nano model is currently downloading in the background. Please wait a moment and try again.'
+            );
+          }
+          // if availability is 'downloadable', we proceed to call create() to trigger the final download/initialization.
+        } else {
+          // Check capabilities — this is the real gate
+          const cap = await (aiNS.languageModel || aiNS.assistant)?.capabilities?.();
+
+          if (cap) {
+            if (cap.available === 'no') {
+              throw new Error(
+                'Gemini Nano is not available on this device. Your hardware may not meet Google\'s requirements (needs 22+ GB of storage free and 4+ GB RAM).'
+              );
+            }
+            if (cap.available === 'after-download') {
+              throw new Error(
+                'Gemini Nano model weights haven\'t finished downloading yet.\n\n' +
+                'To fix this: Open chrome://components → find "Optimization Guide On Device Model" → click "Check for update". ' +
+                'Wait until the version number is non-zero and shows "Up-to-date", then try again.'
+              );
+            }
+          }
+        }
+
+        setProgress({ stage: 'connect', text: 'Starting Gemini Nano session…', percent: 70 });
+
+        // Create a test session to confirm everything works
+        let session = null;
+        if (hasGlobalLM) {
+          session = await window.LanguageModel.create();
+        } else if (aiNS.languageModel?.create) {
+          session = await aiNS.languageModel.create();
+        } else if (aiNS.assistant?.create) {
+          session = await aiNS.assistant.create();
+        } else if (aiNS.createTextSession) {
+          session = await aiNS.createTextSession();
+        }
+
+        if (!session) {
+          throw new Error('Gemini Nano session could not be created. Try relaunching Chrome and loading the model again.');
+        }
+
+        // Immediately destroy the test session
+        try { await session.destroy?.(); } catch { /* ignore */ }
+        try { await session.close?.(); } catch { /* ignore */ }
+
+        setStatus(MODEL_STATUS.READY);
+        setProgress({ stage: 'done', text: '✨ Gemini Nano Ready — fully local!', percent: 100 });
+      } catch (e) {
+        setError(e.message || 'Gemini Nano is unavailable. Please follow the setup guide in the Diagnostic page.');
+        setStatus(MODEL_STATUS.ERROR);
+      }
+      return;
+    }
+
+    const api = apiRef.current;
+    if (!api) return;
+
+    const device = profile.model?.device || (profile.supportsWebGPU && !profile.isFallbackAdapter ? 'webgpu' : 'wasm');
+    setStatus(MODEL_STATUS.LOADING);
 
     const progressCallback = Comlink.proxy((p) => {
       setProgress({
@@ -166,6 +259,81 @@ export function useModelManager() {
   }, []);
 
   const chat = useCallback(async (messages, onToken) => {
+    if (modelId === 'chrome-gemini-nano') {
+      try {
+        const systemMsg = messages.find(m => m.role === 'system')?.content || '';
+
+        const hasGlobalLM = typeof window.LanguageModel !== 'undefined' && typeof window.LanguageModel.create === 'function';
+
+        let aiNS = null;
+        if (!hasGlobalLM) {
+          aiNS =
+            (typeof ai !== 'undefined' && ai?.languageModel ? ai :
+            typeof ai !== 'undefined' && ai?.assistant ? ai :
+            typeof ai !== 'undefined' && ai?.createTextSession ? ai :
+            window?.ai?.languageModel ? window.ai :
+            window?.ai?.assistant ? window.ai :
+            window?.ai?.createTextSession ? window.ai :
+            null);
+        }
+
+        if (!hasGlobalLM && !aiNS) throw new Error('Chrome Prompt API not available. Is Gemini Nano still loaded?');
+
+        let session = null;
+        if (hasGlobalLM) {
+          session = await window.LanguageModel.create({ systemPrompt: systemMsg });
+        } else if (aiNS.languageModel?.create) {
+          session = await aiNS.languageModel.create({ systemPrompt: systemMsg });
+        } else if (aiNS.assistant?.create) {
+          session = await aiNS.assistant.create({ systemPrompt: systemMsg });
+        } else if (aiNS.createTextSession) {
+          session = await aiNS.createTextSession();
+        }
+
+        if (!session) throw new Error('Could not create Gemini Nano session.');
+
+        // Flatten dialogue turns for Prompt API
+        let promptText = '';
+        messages.forEach(m => {
+          if (m.role === 'system') return;
+          promptText += `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}\n`;
+        });
+        promptText += "Assistant: ";
+
+        let fullText = '';
+        if (session.promptStreaming) {
+          const stream = session.promptStreaming(promptText);
+          for await (const chunk of stream) {
+            let delta = '';
+            if (chunk.startsWith(fullText)) {
+              // Cumulative style
+              delta = chunk.slice(fullText.length);
+              fullText = chunk;
+            } else {
+              // Delta style
+              delta = chunk;
+              fullText += chunk;
+            }
+            onToken?.(delta, fullText, false);
+          }
+        } else {
+          const res = await session.prompt(promptText);
+          fullText = res;
+          onToken?.(res, res, false);
+        }
+        
+        onToken?.('', fullText, true);
+        
+        // Clean up session resources to prevent memory leaks in Chrome
+        await session.destroy?.() || await session.close?.();
+        
+        return { content: fullText, modelTier: 'GEMINI_NANO' };
+      } catch (e) {
+        console.error('Gemini Nano chat error:', e);
+        throw e;
+      }
+    }
+
     const api = apiRef.current;
     if (!api || statusRef.current !== MODEL_STATUS.READY) return null;
 
@@ -175,7 +343,7 @@ export function useModelManager() {
 
     // FIX: don't swallow errors — let them propagate to Chat.jsx error handler
     return await api.chat(messages, streamCallback);
-  }, []);
+  }, [modelId]);
 
   const embedText = useCallback(async (text) => {
     const api = apiRef.current;

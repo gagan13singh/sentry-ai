@@ -30,7 +30,7 @@ import {
   Sparkles, User, Copy, Check, StopCircle, FileText,
   ShieldAlert, ShieldCheck, Download, AlertTriangle, Info,
   Edit2, RefreshCw, PanelLeftClose, PanelLeft, X,
-  Volume2, VolumeX, DownloadCloud, BookOpen, UploadCloud,
+  Volume2, VolumeX, DownloadCloud, BookOpen, UploadCloud, Search,
 } from 'lucide-react';
 import { useApp } from '../App';
 import { MODEL_STATUS } from '../hooks/useModelManager';
@@ -71,14 +71,42 @@ function triggerDownload(blob, filename) {
 }
 
 // ── Memoized Message Row ───────────────────────────────────────────
-const MessageItem = memo(({ msg, isLastMsg, onCopy, copiedId, onEdit, onRetry, onToggleSpeak }) => {
+const MessageItem = memo(({ msg, isLastMsg, onCopy, copiedId, onEdit, onRetry, onToggleSpeak, searchQuery }) => {
+  const isMatched = searchQuery && msg.content.toLowerCase().includes(searchQuery.toLowerCase());
   return (
-    <div className={`message-row ${msg.role}`}>
+    <div className={`message-row ${msg.role} ${isMatched ? 'search-matched' : ''}`} style={{
+      border: isMatched ? '1px solid rgba(6, 182, 212, 0.4)' : undefined,
+      boxShadow: isMatched ? '0 0 12px rgba(6, 182, 212, 0.15)' : undefined,
+      background: isMatched ? 'rgba(6, 182, 212, 0.04)' : undefined,
+      borderRadius: 12,
+      transition: 'all 0.3s ease',
+    }}>
       <div className="msg-avatar">
         {msg.role === 'user' ? <User size={16} /> : <Sparkles size={18} fill="currentColor" />}
       </div>
       <div className="msg-bubble">
-        {msg.image && <img src={msg.image} alt="attached" className="msg-image" loading="lazy" />}
+        {msg.image && (
+          <div style={{ position: 'relative' }}>
+            <img src={msg.image} alt="attached" className="msg-image" loading="lazy" />
+            {msg.caption && (
+              <div className="image-caption-tag" style={{
+                fontSize: 10,
+                color: 'var(--cyan)',
+                background: 'rgba(6, 182, 212, 0.08)',
+                border: '1px solid rgba(6, 182, 212, 0.2)',
+                borderRadius: 4,
+                padding: '4px 8px',
+                marginTop: 6,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 4,
+                fontWeight: 500,
+              }}>
+                <span>👁️ Private Analysis: "{msg.caption}"</span>
+              </div>
+            )}
+          </div>
+        )}
         {msg._hadImage && !msg.image && (
           <div className="text-xs text-muted" style={{ marginBottom: 8, fontStyle: 'italic' }}>
             [Image not persisted — reattach to use again]
@@ -160,7 +188,8 @@ const MessageItem = memo(({ msg, isLastMsg, onCopy, copiedId, onEdit, onRetry, o
     prev.msg.streaming === next.msg.streaming &&
     prev.isLastMsg === next.isLastMsg &&
     prev.copiedId === next.copiedId &&
-    prev.msg.isSpeaking === next.msg.isSpeaking
+    prev.msg.isSpeaking === next.msg.isSpeaking &&
+    prev.searchQuery === next.searchQuery
   );
 });
 
@@ -193,6 +222,17 @@ export default function Chat() {
   const [threatBanner, setThreatBanner] = useState(null);
   const [piiWarning, setPiiWarning] = useState(null);
   const [speakingId, setSpeakingId] = useState(null);
+  const [searchSidebarQuery, setSearchSidebarQuery] = useState('');
+  const [searchChatQuery, setSearchChatQuery] = useState('');
+  const [showChatSearch, setShowChatSearch] = useState(false);
+  const [isAnalyzingImage, setIsAnalyzingImage] = useState(false);
+
+  const filteredConversations = useMemo(() => {
+    if (!searchSidebarQuery.trim()) return conversations;
+    return conversations.filter(c =>
+      c.title.toLowerCase().includes(searchSidebarQuery.toLowerCase())
+    );
+  }, [conversations, searchSidebarQuery]);
   // FIX: use lazy initializer — avoids reading window at module init time
   const [isSidebarOpen, setIsSidebarOpen] = useState(() => window.innerWidth > 768);
   // IMPROVEMENT: track whether sidebar was auto-closed for mobile
@@ -386,7 +426,7 @@ export default function Chat() {
   const debouncedStreamUpdate = useCallback((assistantId, content, done) => {
     pendingStreamUpdate.current = { assistantId, content, done, convId: activeIdRef.current };
     if (streamingUpdateTimer.current) clearTimeout(streamingUpdateTimer.current);
-    const delay = done ? 0 : 80;
+    const delay = done ? 0 : 20;
     streamingUpdateTimer.current = setTimeout(() => {
       const update = pendingStreamUpdate.current;
       if (!update) return;
@@ -427,6 +467,23 @@ export default function Chat() {
     };
 
     const convId = activeIdRef.current;
+    
+    let imageAnalysisText = '';
+    if (attachedImg) {
+      setIsAnalyzingImage(true);
+      try {
+        const caption = await model.captionImage(attachedImg);
+        if (caption) {
+          imageAnalysisText = `\n\n[Private Offline Image Analysis of attached image: "${caption}"]`;
+          userMsg.caption = caption;
+        }
+      } catch (err) {
+        console.error('Offline Vision Captioning error:', err);
+      } finally {
+        setIsAnalyzingImage(false);
+      }
+    }
+
     const updatedMsgs = [...currentMsgs, userMsg];
 
     setConversations(prev => prev.map(c =>
@@ -441,7 +498,7 @@ export default function Chat() {
       : [];
     const cutoffCtx = buildCutoffContext(hasRagContext);
 
-    const systemPrompt = `You are Sentry AI, a private local AI assistant. Be helpful, accurate, and concise.\n\nCRITICAL: You MUST format ALL mathematical expressions and equations using LaTeX. You MUST wrap inline math in $...$ (e.g. $x^2=4$) and block math in $$...$$ (e.g. $$E=mc^2$$). DO NOT output plain LaTeX without the $ or $$ wrappers.${hasRagContext ? `\n\nContext from user documents:\n${ragText.slice(0, 4000)}` : ''}${cutoffCtx}`;
+    const systemPrompt = `You are Sentry AI, a private local AI assistant. Be helpful, accurate, and concise.\n\nCRITICAL CODING & MATH GUIDELINES:\n1. If writing algorithms, code snippets, or mathematical formulas, double-check all variables, indices, denominators, and coefficients to prevent mathematical hallucinations.\n2. If a closed-form equation (e.g. Binet's formula) is complex or prone to precision errors, prioritize providing a robust, highly stable iterative implementation as the primary solution.\n3. You MUST format ALL mathematical expressions and equations using LaTeX. You MUST wrap inline math in $...$ (e.g. $x^2=4$) and block math in $$...$$ (e.g. $$E=mc^2$$). DO NOT output plain LaTeX without the $ or $$ wrappers.${hasRagContext ? `\n\nContext from user documents:\n${ragText.slice(0, 4000)}` : ''}${cutoffCtx}`;
 
     const messages = [
       { role: 'system', content: systemPrompt },
@@ -449,7 +506,7 @@ export default function Chat() {
         role: m.role,
         content: m.content,
       })),
-      { role: 'user', content: userText },
+      { role: 'user', content: userText + imageAnalysisText },
     ];
 
     const assistantId = crypto.randomUUID();
@@ -731,8 +788,35 @@ export default function Chat() {
             </button>
           </div>
         </div>
+
+        {/* Sidebar Search Bar */}
+        <div className="sidebar-search-wrap" style={{ padding: '0 12px 10px 12px', borderBottom: '1px solid var(--border)', marginBottom: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', background: 'var(--bg-secondary)', borderRadius: 6, border: '1px solid var(--border)', padding: '4px 8px', gap: 6 }}>
+            <Search size={12} className="text-muted" />
+            <input
+              type="text"
+              value={searchSidebarQuery}
+              onChange={e => setSearchSidebarQuery(e.target.value)}
+              placeholder="Search conversations..."
+              style={{
+                flex: 1,
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--text-primary)',
+                fontSize: '0.78rem',
+                outline: 'none',
+              }}
+            />
+            {searchSidebarQuery && (
+              <button onClick={() => setSearchSidebarQuery('')} style={{ border: 'none', background: 'transparent', color: 'var(--muted)', cursor: 'pointer', padding: 0 }}>
+                <X size={12} />
+              </button>
+            )}
+          </div>
+        </div>
+
         <div className="conv-list">
-          {conversations.map(c => (
+          {filteredConversations.map(c => (
             <div
               key={c.id}
               className={`conv-item ${c.id === activeId ? 'active' : ''}`}
@@ -750,6 +834,11 @@ export default function Chat() {
               </button>
             </div>
           ))}
+          {filteredConversations.length === 0 && (
+            <div style={{ padding: '12px 16px', fontSize: 11, color: 'var(--muted)', textAlign: 'center' }}>
+              No chats found
+            </div>
+          )}
         </div>
         {threatLog.length > 0 && (
           <div style={{ padding: '8px 12px', borderTop: '1px solid var(--border)' }}>
@@ -781,11 +870,64 @@ export default function Chat() {
           </span>
 
           {activeConv?.messages.length > 0 && (
-            <button className="btn btn-secondary btn-sm" onClick={exportAsMarkdown} title="Export as Markdown">
-              <DownloadCloud size={14} /> <span style={{ fontSize: 12 }}>Export</span>
-            </button>
+            <>
+              {/* Active Chat Message Search Button */}
+              <button
+                className={`btn-icon ${showChatSearch ? 'active' : ''}`}
+                onClick={() => {
+                  setShowChatSearch(!showChatSearch);
+                  if (showChatSearch) setSearchChatQuery('');
+                }}
+                title="Search messages"
+                style={{ marginRight: 8, color: showChatSearch ? 'var(--cyan)' : 'var(--text-muted)' }}
+              >
+                <Search size={16} />
+              </button>
+
+              <button className="btn btn-secondary btn-sm" onClick={exportAsMarkdown} title="Export as Markdown" style={{ marginRight: 4 }}>
+                <DownloadCloud size={14} /> <span style={{ fontSize: 12 }}>Export</span>
+              </button>
+            </>
           )}
         </div>
+
+        {/* Active Chat Search Bar Input */}
+        {showChatSearch && activeConv && (
+          <div className="chat-search-bar" style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            padding: '10px 16px',
+            background: 'var(--bg-secondary)',
+            borderBottom: '1px solid var(--border)',
+            animation: 'fade-in 0.2s ease',
+          }}>
+            <Search size={14} className="text-muted" />
+            <input
+              type="text"
+              value={searchChatQuery}
+              onChange={e => setSearchChatQuery(e.target.value)}
+              placeholder="Search inside this conversation..."
+              style={{
+                flex: 1,
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--text-primary)',
+                fontSize: '0.85rem',
+                outline: 'none',
+              }}
+              autoFocus
+            />
+            {searchChatQuery && (
+              <span className="text-xs text-muted" style={{ marginRight: 8 }}>
+                {activeConv.messages.filter(m => m.content.toLowerCase().includes(searchChatQuery.toLowerCase())).length} matches
+              </span>
+            )}
+            <button className="btn-icon" onClick={() => { setShowChatSearch(false); setSearchChatQuery(''); }} style={{ padding: 2 }}>
+              <X size={14} />
+            </button>
+          </div>
+        )}
 
         {/* Banners */}
         {threatBanner && (
@@ -894,8 +1036,23 @@ export default function Chat() {
               onEdit={handleEditMessage}
               onRetry={handleRetryMessage}
               onToggleSpeak={handleToggleSpeak}
+              searchQuery={searchChatQuery}
             />
           ))}
+
+          {isAnalyzingImage && (
+            <div className="message-row assistant analyzing-image-msg" style={{ opacity: 0.85, animation: 'fade-in 0.3s ease' }}>
+              <div className="msg-avatar">
+                <Sparkles size={18} className="text-cyan" />
+              </div>
+              <div className="msg-bubble" style={{ border: '1px dashed var(--cyan)', background: 'rgba(6, 182, 212, 0.03)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: 'var(--cyan)' }}>
+                  <RefreshCw size={14} className="spin-slow" />
+                  <span>Sentry AI is analyzing your image offline...</span>
+                </div>
+              </div>
+            </div>
+          )}
           <div ref={bottomRef} style={{ height: 120, flexShrink: 0, width: '100%' }} />
         </div>
 

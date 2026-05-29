@@ -1,9 +1,42 @@
-import { useState } from 'react';
-import { HelpCircle, ChevronDown, ChevronRight, AlertTriangle, Trash2, ShieldCheck, Smartphone, Brain, MessageSquareWarning, FolderOpen, HardDrive, Cpu, Image, FileText, WifiOff } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { HelpCircle, ChevronDown, ChevronRight, AlertTriangle, Trash2, ShieldCheck, Smartphone, Brain, MessageSquareWarning, FolderOpen, HardDrive, Cpu, Image, FileText, WifiOff, Sparkles, AlertCircle } from 'lucide-react';
 import '../pages/pages.css';
+import { Link } from 'react-router-dom';
+import { detectHardwareProfile } from '../lib/deviceProfile';
 
 export default function Help() {
   const [openAccordion, setOpenAccordion] = useState('install');
+  const [profile, setProfile] = useState(null);
+  const [checkingHardware, setCheckingHardware] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    async function check() {
+      try {
+        const result = await detectHardwareProfile();
+        if (active) {
+          setProfile(result);
+          setCheckingHardware(false);
+        }
+      } catch (err) {
+        console.error("Hardware profile check failed", err);
+        if (active) {
+          setCheckingHardware(false);
+        }
+      }
+    }
+    check();
+    return () => { active = false; };
+  }, []);
+
+  const isChromiumBrowser = () => {
+    if (typeof window === 'undefined') return false;
+    const ua = navigator.userAgent.toLowerCase();
+    const isChrome = ua.includes('chrome') || ua.includes('chromium') || ua.includes('crios');
+    const isSafari = ua.includes('safari') && !ua.includes('chrome') && !ua.includes('chromium') && !ua.includes('crios');
+    const isFirefox = ua.includes('firefox') || ua.includes('fxios');
+    return isChrome && !isSafari && !isFirefox;
+  };
 
   const toggleAccordion = (id) => {
     setOpenAccordion(openAccordion === id ? null : id);
@@ -124,6 +157,34 @@ export default function Help() {
               <p style={{ marginTop: '10px' }}>This means your data is persistent between sessions, but it never touches a cloud server. You can wipe this history at any time using the "Clear Local Data" button.</p>
             </>
           )
+        },
+        {
+          id: 'gemini-privacy',
+          icon: <ShieldCheck size={18} className="text-emerald" />,
+          title: "What is Google Gemini Nano and is it completely private?",
+          content: (
+            <>
+              <p>Google Gemini Nano is a highly optimized, native large language model developed by Google and built directly into modern Chromium browsers (Chrome, Edge, Brave). Unlike general web models that load large weights in memory via JavaScript wrappers, Gemini Nano runs as a secure browser process.</p>
+              <p style={{ marginTop: '10px' }}><strong>Complete Client-Side Privacy:</strong> When you run Gemini Nano, Sentry AI communicates directly with Chrome's local <strong>Prompt API</strong>. All processing, computations, tokenization, and generation stay strictly inside your local machine's memory (RAM) and execute on your processor/graphics hardware. <strong>Zero bytes of data (no chat messages, no files, no document texts) are ever sent to Google, OpenAI, Sentry AI, or any external servers.</strong> It is 100% offline-ready and private.</p>
+              <p style={{ marginTop: '10px' }}><strong>Sandbox Security:</strong> Because the engine runs within the browser's native process sandbox, it inherits all browser security guarantees. It cannot access your host operating system's files, registry, or local network, ensuring absolute safety.</p>
+            </>
+          )
+        },
+        {
+          id: 'gemini-how-it-works',
+          icon: <Brain size={18} className="text-purple" />,
+          title: "How does Gemini Nano work under the hood? (Full Transparency)",
+          content: (
+            <>
+              <p>Gemini Nano represents a major architectural milestone for web applications. Here is exactly how Sentry AI interacts with it:</p>
+              <ul style={{ marginLeft: '20px', marginTop: '10px', lineHeight: '1.6' }}>
+                <li><strong>Native OS/Browser Weights:</strong> Instead of Sentry AI downloading and parsing a massive 1.5GB compiled neural network file inside JavaScript memory (which often runs out of memory and crashes browser tabs on mobile devices), Chrome itself downloads, manages, and stores the model weights under <code>chrome://components</code>.</li>
+                <li><strong>The Prompt API:</strong> Sentry AI leverages the experimental <code>window.ai.languageModel</code> API. Sentry AI passes the user prompt and context, and the browser executes the prediction using native optimized C++ code.</li>
+                <li><strong>Direct NPU/GPU Acceleration:</strong> Chrome interacts directly with the system's Neural Processing Unit (NPU) or Graphics Processing Unit (GPU) via native platform frameworks (like DirectML on Windows, Vulkan on Linux/Android, or Metal on macOS). This bypasses the heavy web sandbox translation layer, yielding lightning-fast response speeds.</li>
+                <li><strong>Dynamic Resource Allocator:</strong> The browser dynamically loads the model weights when Sentry AI initiates a chat session and unloads it if system memory becomes constrained, protecting your computer's responsiveness.</li>
+              </ul>
+            </>
+          )
         }
       ]
     },
@@ -160,6 +221,38 @@ export default function Help() {
             <>
               <p>The web app itself is a tiny 5MB, but the offline AI models require space. Depending on your device's diagnostic test, Sentry AI will securely cache between 300MB and 1.5GB of model data in your browser's storage.</p>
               <p style={{ marginTop: '10px' }}>This is a one-time download that allows the AI to run instantly on your next visit.</p>
+            </>
+          )
+        },
+        {
+          id: 'gemini-enable',
+          icon: <Cpu size={18} className="text-cyan" />,
+          title: "How do I enable the local Google Gemini Nano Engine?",
+          content: (
+            <>
+              <p>Because Gemini Nano is currently an experimental browser standard, you must explicitly enable it in your browser flags:</p>
+              <ol style={{ marginLeft: '20px', marginTop: '10px', lineHeight: '1.6' }}>
+                <li>Open a new browser tab and navigate to <code style={{ color: 'var(--cyan)' }}>chrome://flags</code>.</li>
+                <li>Search for <strong>"Prompt API for Gemini Nano"</strong> and set it to <strong>Enabled</strong>.</li>
+                <li>Search for <strong>"Optimization Guide On Device Model"</strong> and set it to <strong>Enabled BypassPrefRequirement</strong>.</li>
+                <li>Relaunch your browser, then open <code style={{ color: 'var(--cyan)' }}>chrome://components</code> and click <strong>"Check for update"</strong> on the <em>Optimization Guide On Device Model</em> to download the ~1.5 GB model files locally.</li>
+              </ol>
+              <p style={{ marginTop: '10px' }}>Once completed, Sentry AI will instantly verify compatibility and unlock the Gemini Nano engine on your setup page!</p>
+            </>
+          )
+        },
+        {
+          id: 'gemini-mention-branding',
+          icon: <HelpCircle size={18} className="text-amber" />,
+          title: "Why does Sentry AI explicitly mention Google Chrome and Gemini Nano? What if I use Safari or Firefox?",
+          content: (
+            <>
+              <p>Prominently identifying Google Chrome/Gemini Nano is a technical and UX design necessity for two critical reasons:</p>
+              <ul style={{ marginLeft: '20px', marginTop: '10px', lineHeight: '1.6' }}>
+                <li><strong>The Background Download Check:</strong> The first time you enable the native browser model, Chrome has to download a large model file (~1.5 GB to 4.7 GB depending on device specs and optimization components) in the background under <code>chrome://components</code>. If Sentry AI did not explicitly state this, you would experience a long loading delay without knowing that your browser is actively setting up the model.</li>
+                <li><strong>Browser Compatibility Constraints:</strong> The native Prompt API standard is developed by Google and is currently only supported in Chromium-based browsers like Chrome, Microsoft Edge, and Brave. It does not work on Apple Safari or Mozilla Firefox.</li>
+              </ul>
+              <p style={{ marginTop: '10px' }}><strong>Sentry AI's Auto-Fallback:</strong> If you use Safari, Firefox, or are on an unsupported device, <strong>the application will not break!</strong> Sentry AI will automatically detect your environment and switch to a fully offline WebGPU or CPU-bound WebAssembly (WASM) model. While you lose the speed of Chrome's built-in engine, the core chat and security vault remain completely local and fully functional.</p>
             </>
           )
         }
@@ -215,6 +308,145 @@ export default function Help() {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+        {/* Dynamic Gemini Nano Recommendation Banner */}
+        {!checkingHardware && (
+          <div style={{ animation: 'fade-in 0.5s ease-out' }}>
+            {profile?.supportsGeminiNano ? (
+              <div className="card" style={{
+                background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.06) 0%, rgba(6, 182, 212, 0.03) 100%)',
+                border: '1px solid rgba(16, 185, 129, 0.2)',
+                boxShadow: '0 8px 32px rgba(16, 185, 129, 0.05)',
+                padding: '24px',
+                borderRadius: '12px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '16px'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <div style={{
+                    width: '40px',
+                    height: '40px',
+                    borderRadius: '10px',
+                    background: 'rgba(16, 185, 129, 0.12)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'var(--emerald)'
+                  }}>
+                    <Sparkles size={22} style={{ animation: 'pulse-logo 2.5s ease-in-out infinite' }} />
+                  </div>
+                  <div>
+                    <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--emerald)', margin: 0 }}>
+                      Google Gemini Nano is compatible and ready!
+                    </h3>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '2px', margin: 0 }}>
+                      Device Compatibility: Fully Supported (Natively Integrated)
+                    </p>
+                  </div>
+                </div>
+                <p style={{ fontSize: '0.92rem', lineHeight: 1.6, margin: 0, color: 'var(--text-secondary)' }}>
+                  Excellent news! Sentry AI has detected that your browser natively supports Google's on-device AI. 
+                  Gemini Nano executes locally on your hardware NPU/GPU with <strong>zero network calls and absolute privacy</strong>. 
+                  Since it is built directly into Chrome, it starts instantly, consumes minimal memory, and runs completely offline. 
+                  We highly recommend using Gemini Nano for a premium, fast, and fully secure offline experience.
+                </p>
+                <div>
+                  <Link to="/" className="btn btn-cyan" style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '10px 20px', fontSize: '0.85rem', fontWeight: 600, textDecoration: 'none', borderRadius: '8px' }}>
+                    Select Gemini Nano Engine
+                  </Link>
+                </div>
+              </div>
+            ) : isChromiumBrowser() ? (
+              <div className="card" style={{
+                background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.06) 0%, rgba(99, 102, 241, 0.03) 100%)',
+                border: '1px solid rgba(6, 182, 212, 0.2)',
+                boxShadow: '0 8px 32px rgba(6, 182, 212, 0.05)',
+                padding: '24px',
+                borderRadius: '12px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '16px'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <div style={{
+                    width: '40px',
+                    height: '40px',
+                    borderRadius: '10px',
+                    background: 'rgba(6, 182, 212, 0.12)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'var(--cyan)'
+                  }}>
+                    <Cpu size={22} />
+                  </div>
+                  <div>
+                    <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--cyan)', margin: 0 }}>
+                      Unlock Google Gemini Nano on this Device
+                    </h3>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '2px', margin: 0 }}>
+                      Device Compatibility: Compatible (Setup Required)
+                    </p>
+                  </div>
+                </div>
+                <p style={{ fontSize: '0.92rem', lineHeight: 1.6, margin: 0, color: 'var(--text-secondary)' }}>
+                  You are using a Chromium browser (Chrome/Edge/Brave) that is compatible with Google's built-in <strong>Gemini Nano</strong> model, 
+                  but the experimental browser Prompt API is not active. Enabling it will unlock a high-performance local AI engine running natively on your hardware, bypass general memory constraints, and preserve 100% offline privacy with zero external calls.
+                </p>
+                <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+                  <button 
+                    className="btn btn-cyan" 
+                    onClick={() => setOpenAccordion('gemini-enable')}
+                    style={{ padding: '10px 20px', fontSize: '0.85rem', fontWeight: 600, borderRadius: '8px' }}
+                  >
+                    View Enable Guide
+                  </button>
+                  <Link to="/" className="btn" style={{ padding: '10px 20px', fontSize: '0.85rem', fontWeight: 600, borderRadius: '8px', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', textDecoration: 'none', color: 'var(--text-primary)', display: 'inline-flex', alignItems: 'center' }}>
+                    Go to Setup Tab
+                  </Link>
+                </div>
+              </div>
+            ) : (
+              <div className="card" style={{
+                background: 'rgba(255, 255, 255, 0.01)',
+                border: '1px solid rgba(255, 255, 255, 0.05)',
+                padding: '24px',
+                borderRadius: '12px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '16px'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <div style={{
+                    width: '40px',
+                    height: '40px',
+                    borderRadius: '10px',
+                    background: 'rgba(255, 255, 255, 0.03)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'var(--text-muted)'
+                  }}>
+                    <AlertCircle size={22} />
+                  </div>
+                  <div>
+                    <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--text-primary)', margin: 0 }}>
+                      Interested in native on-device AI?
+                    </h3>
+                    <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '2px', margin: 0 }}>
+                      Device Compatibility: Current Browser Unsupported
+                    </p>
+                  </div>
+                </div>
+                <p style={{ fontSize: '0.92rem', lineHeight: 1.6, margin: 0, color: 'var(--text-secondary)' }}>
+                  Sentry AI supports Google's built-in <strong>Gemini Nano</strong> engine. Because it is part of the modern web platform standard, it requires a Chromium browser (Google Chrome or Microsoft Edge). 
+                  To experience instant startup times, hardware NPU acceleration, and absolute local privacy with no downloads, we recommend opening Sentry AI in Google Chrome.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+
         {faqCategories.map((category) => (
           <div key={category.name} className="card" style={{ padding: '24px' }}>
             <h2 style={{ fontSize: '1.2rem', marginBottom: '16px' }}>{category.name}</h2>

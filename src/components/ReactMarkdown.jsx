@@ -29,7 +29,7 @@
 // B. Tables are wrapped in a scrollable container so they don't overflow.
 // ================================================================
 
-import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
+import { useMemo, useState, useEffect, useRef } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import markedKatex from 'marked-katex-extension';
@@ -87,7 +87,9 @@ function renderMarkdown(raw) {
 export default function ReactMarkdown({ content, isStreaming = false }) {
   // FIX: track latest content in a ref to avoid stale closures in the throttle
   const latestContent = useRef(content);
-  latestContent.current = content;
+  useEffect(() => {
+    latestContent.current = content;
+  }, [content]);
 
   const [renderContent, setRenderContent] = useState(content);
 

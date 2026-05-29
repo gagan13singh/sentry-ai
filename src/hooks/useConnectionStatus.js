@@ -24,9 +24,9 @@
 //    Now cleaned up in the useEffect return.
 // ================================================================
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 
-export function useConnectionStatus(modelReady) {
+export function useConnectionStatus() {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [strictPrivateMode, setStrictPrivateMode] = useState(() => {
     try { return localStorage.getItem('sentry-strict-mode') === 'true'; }

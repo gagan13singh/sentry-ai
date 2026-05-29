@@ -1,0 +1,13 @@
+# Git attributes for Sentry AI
+# Force binary files to be treated as binary (prevent CRLF translation corruption)
+*.woff -text
+*.woff2 -text
+*.ttf -text
+*.eot -text
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.svg text

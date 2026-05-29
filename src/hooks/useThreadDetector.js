@@ -18,9 +18,9 @@ const INJECTION_PATTERNS = [
     /you\s+(are|were|must)\s+now\s+(a|an)\s+/i,
     /new\s+(system\s+)?prompt[:：]/i,
     /\[SYSTEM\]/i,
-    /\<\|im_start\|\>/i,
-    /\<\|im_end\|\>/i,
-    /\<\|system\|\>/i,
+    /<\|im_start\|>/i,
+    /<\|im_end\|>/i,
+    /<\|system\|>/i,
     /###\s*instruction/i,
     /\/\*\s*system:/i,
     // DAN / jailbreak
@@ -41,7 +41,6 @@ const INJECTION_PATTERNS = [
 
 const JAILBREAK_UNICODE = [
     /[\u202E\u200F\u200B\u2028\u2029]/,  // RTL override, zero-width chars
-    /\u0000/,                              // null bytes
 ];
 
 // PII patterns — detect before sending to LLM to warn user
@@ -75,6 +74,12 @@ function calculateThreatScore(text) {
             score += 60;
             threats.push({ type: 'unicode_trick', match: 'suspicious unicode characters' });
         }
+    }
+
+    // Null byte check
+    if (text.includes('\0')) {
+        score += 60;
+        threats.push({ type: 'unicode_trick', match: 'suspicious null bytes' });
     }
 
     // Excessive length with technical keywords (prompt stuffing)
@@ -142,7 +147,7 @@ export function useThreatDetector(onThreatDetected) {
                         phase: 'ai_verified',
                     };
                 }
-            } catch (_) {
+            } catch {
                 // AI scan failed — fall back to pattern result
             }
         }
@@ -160,5 +165,5 @@ export function useThreatDetector(onThreatDetected) {
 
     const clearLog = useCallback(() => setThreatLog([]), []);
 
-    return { lastScan, isScanning, threatLog, scanInput, clearLog, scanCount: scanCountRef.current };
+    return { lastScan, isScanning, threatLog, scanInput, clearLog };
 }

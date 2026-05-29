@@ -8,6 +8,19 @@
 // ================================================================
 
 export const MODEL_TIERS = {
+  GEMINI_NANO: {
+    id: 'chrome-gemini-nano',
+    label: 'Google Gemini Nano',
+    shortLabel: 'Gemini Nano',
+    tagline: 'Runs via Chrome Prompt API · Direct NPU speed',
+    adjectives: ['nano', 'google', 'on-device'],
+    size: 'Built-in (NPU)',
+    icon: '✨',
+    minRam: 4,
+    device: 'chrome-ai',
+    strengths: ['Instant start (no downloads)', 'Direct NPU acceleration', 'Ultimate client-side privacy'],
+    weaknesses: ['Requires Chrome flags enabled', 'Experimental browser API'],
+  },
   SPEED: {
     id: 'Qwen2.5-0.5B-Instruct-q4f16_1-MLC',
     label: 'Qwen 2.5 · 0.5B',
@@ -84,7 +97,18 @@ export function calculateConfidenceScore(hasRagContext, modelTier, messageLength
       source: 'context',
       display: '✅ High confidence',
       color: 'emerald',
-      explanation: 'Answer based on your documents',
+      explanation: 'Answer based on your secure documents',
+    };
+  }
+
+  if (modelTier === 'GEMINI_NANO') {
+    return {
+      level: 'high',
+      score: 85 + Math.min(15, Math.floor(messageLength / 100)),
+      source: 'generated',
+      display: '✨ High confidence (Gemini Nano)',
+      color: 'emerald',
+      explanation: 'Generated locally on your device by Google’s optimized built-in engine',
     };
   }
 
@@ -169,9 +193,9 @@ export async function detectHardwareProfile() {
 
   if (typeof navigator.gpu !== 'undefined') {
     try {
-      const adapter = await navigator.gpu.requestAdapter({
-        powerPreference: 'high-performance',
-      });
+      const isWindows = typeof navigator !== 'undefined' && /win/i.test(navigator.platform || navigator.userAgent);
+      const options = isWindows ? {} : { powerPreference: 'high-performance' };
+      const adapter = await navigator.gpu.requestAdapter(options);
       
       if (adapter) {
         supportsWebGPU = true;
@@ -229,6 +253,19 @@ export async function detectHardwareProfile() {
 
   let tier, model;
   const availableModels = [];
+
+  // Check Chrome Gemini Nano (LanguageModel global / window.ai / ai global) support.
+  // We check existence of the namespace only here; actual capability
+  // (available: 'readily' vs 'after-download' vs 'no') is verified
+  // async at load time.
+  let supportsGeminiNano = false;
+  if (typeof window !== 'undefined') {
+    supportsGeminiNano = !!(
+      (typeof window.LanguageModel !== 'undefined' && typeof window.LanguageModel.create === 'function') ||
+      (typeof ai !== 'undefined' && (ai.languageModel || ai.assistant || ai.createTextSession)) ||
+      (window.ai && (window.ai.languageModel || window.ai.assistant || window.ai.createTextSession))
+    );
+  }
 
   // OPTIMIZATION: Android-aware model selection
   if (!supportsWebGPU || isFallbackAdapter || !hasSharedArrayBuffer || (androidGPU && androidGPU.isLowEnd)) {
@@ -299,12 +336,13 @@ export async function detectHardwareProfile() {
 
   return {
     tier,
-    model,
+    model: model,
     ram,
     gpuInfo,
     supportsWebGPU,
     isFallbackAdapter,
     hasSharedArrayBuffer,
+    supportsGeminiNano,
     warnings,
     recommendations,
     availableModels,
@@ -329,13 +367,27 @@ export function getModelTierFromId(modelId) {
 const PROFILE_CACHE_KEY = 'sentry_hw_profile_v4'; // Bumped for Android fixes
 
 export function generateSessionKey() {
+  try {
+    const cached = sessionStorage.getItem('sentry_session_display_key');
+    if (cached) return cached;
+  } catch {
+    // Ignore and generate new
+  }
+
   const bytes = crypto.getRandomValues(new Uint8Array(8));
-  return (
+  const newKey =
     'SENTRY_LOCAL_' +
     Array.from(bytes)
       .map((b) => b.toString(16).toUpperCase().padStart(2, '0'))
-      .join('')
-  );
+      .join('');
+
+  try {
+    sessionStorage.setItem('sentry_session_display_key', newKey);
+  } catch {
+    // Ignore
+  }
+
+  return newKey;
 }
 
 export function getCachedProfile() {

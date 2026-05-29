@@ -5,7 +5,7 @@
 // FIXED: persistDB/loadDB use IndexedDB (already done) — kept as-is
 // ================================================================
 
-import { create, insert, search, remove, count } from '@orama/orama';
+import { create, insert, search, count } from '@orama/orama';
 
 let db = null;
 const IDB_NAME = 'sentry-ai-orama';
@@ -236,7 +236,7 @@ export async function loadDBFromIDB() {
       if (doc.embedding && !(doc.embedding instanceof Array)) {
         doc.embedding = Array.from(doc.embedding);
       }
-      try { await insert(db, { ...doc }); } catch (_) { }
+      try { await insert(db, { ...doc }); } catch { /* ignore */ }
     }
     return docs.length;
   } catch (e) {
@@ -248,6 +248,25 @@ export async function loadDBFromIDB() {
 export async function clearDB() {
   db = await create({ schema: makeSchema() });
   await idbClear();
+}
+
+export async function getChunksBySource(source) {
+  try {
+    const docs = await idbGetAll();
+    return docs.filter(doc => doc.source === source);
+  } catch (e) {
+    console.warn('Orama getChunksBySource warning:', e.message);
+    return [];
+  }
+}
+
+export async function getAllChunks() {
+  try {
+    return await idbGetAll();
+  } catch (e) {
+    console.warn('Orama getAllChunks warning:', e.message);
+    return [];
+  }
 }
 
 // ── Utilities ──────────────────────────────────────────────────────

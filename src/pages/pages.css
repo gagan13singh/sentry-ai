@@ -891,12 +891,14 @@
 
 /* ── VAULT ──────────────────────────────────────────────────────── */
 .drop-zone {
-  border: 2px dashed var(--border);
+  background: rgba(255, 255, 255, 0.005);
+  border: 1.5px dashed rgba(255, 255, 255, 0.08);
   border-radius: var(--radius-xl);
   padding: 48px;
   text-align: center;
   cursor: pointer;
-  transition: all var(--transition);
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.2);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -905,14 +907,16 @@
 }
 
 .drop-zone:hover:not(.disabled) {
-  border-color: var(--border-hover);
-  background: var(--cyan-dim);
+  border-color: var(--cyan) !important;
+  background: rgba(6, 182, 212, 0.01) !important;
+  box-shadow: 0 0 20px rgba(6, 182, 212, 0.05), inset 0 2px 8px rgba(0, 0, 0, 0.1) !important;
 }
 
 .drop-zone.dragging {
-  border-color: var(--cyan);
-  background: var(--cyan-dim);
-  transform: scale(1.01);
+  border-color: var(--cyan) !important;
+  background: rgba(6, 182, 212, 0.03) !important;
+  box-shadow: 0 0 25px rgba(6, 182, 212, 0.1) !important;
+  transform: scale(1.005);
 }
 
 .drop-zone.disabled {
@@ -920,9 +924,57 @@
   cursor: not-allowed;
 }
 
+/* Premium Tab Switcher & Quick Ingest Animation Styles */
+.vault-tabs {
+  position: relative;
+}
+
+.vault-tabs .btn {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.05);
+}
+
+.vault-tabs .btn-primary {
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.12) 0%, rgba(139, 92, 246, 0.12) 100%) !important;
+  border: 1px solid rgba(6, 182, 212, 0.35) !important;
+  color: var(--cyan) !important;
+  box-shadow: 0 0 15px rgba(6, 182, 212, 0.08), inset 0 1px 0 rgba(255,255,255,0.05);
+  text-shadow: 0 0 5px rgba(6, 182, 212, 0.25);
+}
+
+.vault-tabs .btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255,255,255,0.08);
+}
+
+/* Custom transitions and slide animations */
+@keyframes chunkFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.file-grid > div,
+.search-results > div,
+.file-card,
+.result-card {
+  animation: chunkFadeIn 0.3s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
 .ingest-progress {
   padding: 16px;
   margin-bottom: 16px;
+  background: rgba(6, 182, 212, 0.02);
+  border: 1px solid rgba(6, 182, 212, 0.15);
 }
 
 .vault-search {
@@ -1657,4 +1709,66 @@
     width: 32px;
     height: 32px;
   }
+}
+
+/* ── Premium Claude/Gemini-Style Upgrades ── */
+.message-row.user .msg-bubble {
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.12) 0%, rgba(30, 41, 59, 0.7) 100%);
+  border: 1px solid rgba(6, 182, 212, 0.15);
+  border-radius: 20px;
+  border-bottom-right-radius: 4px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  padding: 12px 18px;
+}
+
+.search-matched {
+  animation: pulse-matched 2s infinite ease-in-out;
+}
+
+@keyframes pulse-matched {
+  0%, 100% {
+    border-color: rgba(6, 182, 212, 0.3);
+    box-shadow: 0 0 8px rgba(6, 182, 212, 0.1);
+  }
+  50% {
+    border-color: rgba(6, 182, 212, 0.6);
+    box-shadow: 0 0 16px rgba(6, 182, 212, 0.3);
+  }
+}
+
+.spin-slow {
+  animation: spin 3s linear infinite;
+}
+
+@keyframes spin {
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+/* Glassmorphism search input styling for conversations */
+.sidebar-search-input::placeholder {
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.sidebar-search-input:focus {
+  color: var(--text-primary);
+}
+
+/* Streaming cursor blink animations */
+.cursor-blink {
+  color: var(--cyan);
+  font-weight: 700;
+  animation: blink 0.8s infinite step-end;
+}
+
+@keyframes blink {
+  from, to { opacity: 0; }
+  50% { opacity: 1; }
+}
+
+/* Dotted analyzing loader card styling */
+.analyzing-image-msg .msg-bubble {
+  box-shadow: 0 4px 16px rgba(6, 182, 212, 0.05);
 }

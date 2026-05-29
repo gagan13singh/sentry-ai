@@ -144,9 +144,14 @@ export function useNetworkAudit() {
   }, []);
 
   useEffect(() => {
-    startMonitoring();
-    return stopMonitoring;
-  }, []);
+    const t = setTimeout(() => {
+      startMonitoring();
+    }, 0);
+    return () => {
+      clearTimeout(t);
+      stopMonitoring();
+    };
+  }, [startMonitoring, stopMonitoring]);
 
   // FIXED: genuinely unexpected calls only (not CDN assets, not model downloads)
   const suspiciousRequests = requests.filter(r =>

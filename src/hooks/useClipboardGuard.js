@@ -3,23 +3,55 @@
 // FIXED: result was referenced before guardPaste returned (temporal dead zone).
 //        The onBlocked callback now receives { cleaned, threats } directly
 //        instead of trying to close over `result`.
+// FIXED: Completely removed RegExp control characters to avoid ESLint warnings.
+//        Now relies on high-performance character-based filtering.
 // ================================================================
 
 import { useCallback, useState } from 'react';
+
+// Character-based control check helper (fully immune to ESLint control-regex warnings)
+function hasControlChars(text) {
+    for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i);
+        if (code === 0 || code === 1 || code === 2 || code === 3 || code === 27) {
+            return true;
+        }
+    }
+    return false;
+}
 
 const CLIPBOARD_THREATS = [
     { name: 'Zero-Width Chars', pattern: /[\u200B-\u200D\uFEFF\u00AD]/, severity: 'high' },
     { name: 'RTL Override', pattern: /[\u202E\u202D\u200F]/, severity: 'critical' },
     { name: 'Homograph Attack', pattern: /[\u0430\u043E\u0440\u0441\u0435\u0456\u0458\u04CF]/, severity: 'high' },
-    { name: 'Hidden Instruction', pattern: /\x00|\x01|\x02|\x03|\x1B/, severity: 'high' },
+    { name: 'Hidden Instruction', pattern: { test: (text) => hasControlChars(text) }, severity: 'high' },
     { name: 'Prompt Injection', pattern: /ignore.{0,20}(previous|prior|above)\s+instructions?/i, severity: 'critical' },
     { name: 'System Impersonation', pattern: /\[SYSTEM\]|\[ASSISTANT\]|\[INST\]/i, severity: 'high' },
 ];
 
 function stripHiddenChars(text) {
-    return text
-        .replace(/[\u200B-\u200D\uFEFF\u00AD\u202E\u202D\u200F]/g, '')
-        .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+    let result = '';
+    for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i);
+        // Strip zero-width chars (8203-8205, 65279, 173) and RTL overrides (8238, 8237, 8207)
+        if (
+            code === 8203 || code === 8204 || code === 8205 || code === 65279 || code === 173 ||
+            code === 8238 || code === 8237 || code === 8207
+        ) {
+            continue;
+        }
+        // Strip other hidden control characters (0-8, 11-12, 14-31, 127)
+        if (
+            (code >= 0 && code <= 8) ||
+            code === 11 || code === 12 ||
+            (code >= 14 && code <= 31) ||
+            code === 127
+        ) {
+            continue;
+        }
+        result += text[i];
+    }
+    return result;
 }
 
 function analyzeClipboard(text) {

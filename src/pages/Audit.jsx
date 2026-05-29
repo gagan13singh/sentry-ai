@@ -8,7 +8,7 @@
 // NEW: Memory usage display
 // ================================================================
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Activity, Shield, Wifi, WifiOff, HardDrive,
   Eye, Download, RefreshCw, CheckCircle, Globe,
@@ -22,13 +22,29 @@ import { getStorageInfo, listCachedModels } from '../lib/opfs';
 
 export default function Audit() {
   const { model, connStatus } = useApp();
-  const audit = useNetworkAudit();
+  const {
+    requests,
+    suspiciousRequests,
+    telemetryRequests,
+    modelDownloadRequests,
+    sessionStats,
+    clearRequests
+  } = useNetworkAudit();
   const vault = useSessionVault();
 
   const [storageInfo, setStorageInfo] = useState(null);
   const [cachedModels, setCachedModels] = useState([]);
   const [lastRefresh, setLastRefresh] = useState(new Date());
   const [memUsage, setMemUsage] = useState(null);
+
+  const refreshData = useCallback(async () => {
+    const info = await getStorageInfo();
+    const models = await listCachedModels();
+    setStorageInfo(info);
+    setCachedModels(models);
+    setLastRefresh(new Date());
+    clearRequests();
+  }, [clearRequests]);
 
   useEffect(() => {
     refreshData();
@@ -39,16 +55,7 @@ export default function Audit() {
       const t = setInterval(() => setMemUsage({ ...performance.memory }), 5000);
       return () => clearInterval(t);
     }
-  }, []);
-
-  async function refreshData() {
-    const info = await getStorageInfo();
-    const models = await listCachedModels();
-    setStorageInfo(info);
-    setCachedModels(models);
-    setLastRefresh(new Date());
-    audit.clearRequests();
-  }
+  }, [refreshData]);
 
   const handlePanicWipe = async () => {
     const confirmed = window.confirm(
@@ -68,7 +75,6 @@ export default function Audit() {
   };
 
   // FIXED: genuinely suspicious = only unexpected external calls
-  const { suspiciousRequests, telemetryRequests, modelDownloadRequests } = audit;
 
   // Privacy score: only deduct for truly unexpected/telemetry calls
   const privacyScore = Math.max(0,
@@ -167,7 +173,7 @@ export default function Audit() {
         <StatusCard
           icon={<Eye size={20} className={isPrivate ? 'text-emerald' : 'text-red'} />}
           label="Exfiltration"
-          value={telemetryRequests.length === 0 ? '0 bytes' : `${audit.sessionStats.externalBytes} B`}
+          value={telemetryRequests.length === 0 ? '0 bytes' : `${sessionStats.externalBytes} B`}
           accent={isPrivate ? 'emerald' : 'red'}
           sub="Unauthorized data sent"
         />
@@ -198,18 +204,18 @@ export default function Audit() {
             <span className="badge badge-emerald" style={{ fontSize: '0.65rem' }}>
               <span className="pulse" /> Live
             </span>
-            <button className="btn-icon" onClick={audit.clearRequests}><RefreshCw size={12} /></button>
+            <button className="btn-icon" onClick={clearRequests}><RefreshCw size={12} /></button>
           </div>
         </div>
 
         <div className="network-feed">
-          {audit.requests.length === 0 ? (
+          {requests.length === 0 ? (
             <div className="feed-empty">
               <CheckCircle size={24} className="text-emerald" />
               <span className="text-sm text-muted">No network requests detected</span>
             </div>
           ) : (
-            audit.requests.slice(0, 25).map(req => (
+            requests.slice(0, 25).map(req => (
               <NetworkEntry key={req.id} req={req} />
             ))
           )}
@@ -217,9 +223,9 @@ export default function Audit() {
 
         <div className="feed-stats">
           <span className="text-xs text-muted">
-            {audit.sessionStats.totalRequests} total · {(audit.sessionStats.totalBytes / 1024).toFixed(1)} KB
-            {audit.sessionStats.externalBytes > 0 && (
-              <span className="text-amber"> · {(audit.sessionStats.externalBytes / 1024).toFixed(1)} KB external</span>
+            {sessionStats.totalRequests} total · {(sessionStats.totalBytes / 1024).toFixed(1)} KB
+            {sessionStats.externalBytes > 0 && (
+              <span className="text-amber"> · {(sessionStats.externalBytes / 1024).toFixed(1)} KB external</span>
             )}
           </span>
           <span className={`text-xs ${isPrivate ? 'text-emerald' : 'text-amber'}`}>
