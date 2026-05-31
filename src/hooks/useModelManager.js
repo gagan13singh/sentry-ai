@@ -137,6 +137,13 @@ export function useModelManager() {
         }
 
         if (!hasGlobalLM && !aiNS) {
+          const isMobile = /mobi|android|iphone|ipad|ipod/i.test(navigator.userAgent.toLowerCase());
+          if (isMobile) {
+            throw new Error(
+              'Google Gemini Nano / Prompt API is currently not supported on mobile browsers.\n' +
+              'Please use one of Sentry AI\'s mobile-optimized engines like "Lightning Fast" or "Universal Compatible".'
+            );
+          }
           throw new Error(
             'Chrome Prompt API not found. Make sure you:\n' +
             '1. Are using Chrome 129+ (not Firefox, Edge, or Safari)\n' +

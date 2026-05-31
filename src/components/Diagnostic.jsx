@@ -87,7 +87,8 @@ const isChromiumBrowser = () => {
     const isChrome = ua.includes('chrome') || ua.includes('chromium') || ua.includes('crios');
     const isSafari = ua.includes('safari') && !ua.includes('chrome') && !ua.includes('chromium') && !ua.includes('crios');
     const isFirefox = ua.includes('firefox') || ua.includes('fxios');
-    return isChrome && !isSafari && !isFirefox;
+    const isMobile = /mobi|android|iphone|ipad|ipod/i.test(ua);
+    return isChrome && !isSafari && !isFirefox && !isMobile;
 };
 
 // ── Main component ───────────────────────────────────────────────────────────
